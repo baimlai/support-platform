@@ -1,0 +1,224 @@
+{
+  "mock": true,
+  "dataset_id": "mysql-row-lock-001",
+  "database_type": "mysql",
+  "instance_id": "db-mysql-002",
+  "database": "trade",
+  "scenario": {
+    "label": "MySQL 批量更新引发行锁等待链",
+    "search_query": "MySQL InnoDB 事务 行锁等待 会话 processlist",
+    "steps": [
+      {
+        "tool": "mysql_innodb_status",
+        "label": "InnoDB 事务与锁等待",
+        "args": {
+          "instance_id": "$instance_id",
+          "start_time": "$start_time",
+          "end_time": "$end_time"
+        },
+        "reason": "先查 InnoDB 事务快照，确认是否存在行锁等待、最长等待时间和阻塞事务。"
+      },
+      {
+        "tool": "mysql_processlist",
+        "label": "阻塞会话与等待会话",
+        "args": {
+          "instance_id": "$instance_id",
+          "limit": 20
+        },
+        "reason": "锁等待已经确认，继续查当前会话，定位是谁持有锁、谁在排队，以及阻塞 SQL 的业务来源。"
+      }
+    ],
+    "diagnosis": {
+      "root_cause": "财务对账任务在单个事务中批量更新同一商户的 18000 行账户记录，持续持锁 68 秒，支付服务的余额更新在同一批行上排队，形成 37 个会话的行锁等待链。",
+      "confidence": "高",
+      "evidence_keys": [
+        "mysql.lock.wait_chain",
+        "mysql.session.batch_update"
+      ],
+      "boundary": "结论基于 InnoDB 状态和当前会话快照，未查看应用侧事务代码；真实修复前需要在测试库复现批量更新范围。",
+      "fix": {
+        "primary": [
+          "让财务对账任务改为按账户 ID 分批更新，每批控制在 500~1000 行，并在每批结束后提交事务。",
+          "评估为 `account_balance (merchant_id, status)` 增加联合索引，减少单次 UPDATE 扫描和锁定的行数；先在测试库对比执行计划。",
+          "为支付链路设置合理的 `innodb_lock_wait_timeout` 和快速失败重试，避免请求线程长时间堆积。"
+        ],
+        "alternate": [
+          "如果业务允许，把对账更新改到低峰期，并限制单事务执行时长。",
+          "将批量任务与在线支付拆到不同实例或不同表，降低锁冲突面。"
+        ],
+        "mitigation": [
+          "临时暂停财务跑批任务，观察支付超时是否立即恢复。",
+          "对支付接口限流，避免等待线程继续放大数据库连接数。"
+        ]
+      },
+      "excluded": [
+        "实例整体不可用：会话仍能连接并执行 SQL，其他业务查询也有正常返回。",
+        "纯 SQL 缺少索引导致的全表扫描：当前主因是已持有行锁的批量事务，不是单条支付 SQL 的访问路径。"
+      ],
+      "pending": [
+        "需要应用侧确认财务任务的事务边界和重试策略，当前只能从数据库侧看到批量 UPDATE。",
+        "需要确认 37 个等待会话是否已经触发上游重试，避免修复后出现重复扣款。"
+      ],
+      "verification": [
+        "暂停批量任务后，重新采集 InnoDB 状态，确认等待事务数下降、支付平均耗时恢复。",
+        "在测试库用相同 WHERE 条件执行对账 UPDATE，记录锁定行数和执行时长。",
+        "调整批次大小后对比 `Innodb_row_lock_time_avg` 和支付接口 p99。"
+      ],
+      "limitations": [
+        "没有查看应用代码，无法确认批量任务是否还包含其他写操作。",
+        "会话快照只反映采集时刻，等待链可能随重试继续变化。"
+      ]
+    }
+  },
+  "tool_results": {
+    "mysql_innodb_status": {
+      "payload": {
+        "mock": true,
+        "instance_id": "db-mysql-002",
+        "collected_at": "2026-10-29T10:08:12+08:00",
+        "active_transactions": 42,
+        "waiting_transactions": 37,
+        "max_wait_seconds": 42.6,
+        "blocking_transaction": {
+          "trx_id": "trx-88421",
+          "session_id": 10482,
+          "user": "finance_batch",
+          "age_seconds": 68,
+          "state": "RUNNING",
+          "rows_locked": 18420
+        },
+        "history_list_length": 186,
+        "note": "行锁等待集中在 account_balance 表；数据为模拟快照。"
+      },
+      "details": {
+        "summary": "37 个事务等待行锁，最长 42.6 秒；阻塞事务 trx-88421 已运行 68 秒，锁定约 18420 行",
+        "topic": {
+          "facts": [
+            {
+              "key": "mysql.lock.wait_chain",
+              "statement": "InnoDB 检测到 37 个事务等待行锁，最长等待 42.6 秒；阻塞事务 trx-88421 已运行 68 秒，锁定约 18420 行",
+              "data": {
+                "waiting_transactions": 37,
+                "max_wait_seconds": 42.6,
+                "blocking_trx": "trx-88421",
+                "blocking_age_seconds": 68,
+                "rows_locked": 18420
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "row_lock_chain",
+              "statement": "存在明确的行锁等待链，根因方向是长事务持有大量行锁",
+              "status": "supported"
+            }
+          ],
+          "open_questions": [
+            "需要确认持有锁的事务来自哪个应用和哪条 SQL"
+          ],
+          "next_steps": [
+            "查看当前会话列表",
+            "确认阻塞 SQL 和业务来源",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    },
+    "mysql_processlist": {
+      "payload": {
+        "mock": true,
+        "instance_id": "db-mysql-002",
+        "collected_at": "2026-10-29T10:08:20+08:00",
+        "sessions": [
+          {
+            "id": 10482,
+            "user": "finance_batch",
+            "host": "10.20.3.17:51842",
+            "command": "Query",
+            "time_seconds": 68,
+            "state": "updating",
+            "sql": "UPDATE account_balance SET frozen = frozen + ? WHERE merchant_id = ? AND status = 'PENDING'",
+            "rows_affected_estimate": 18420
+          },
+          {
+            "id": 10771,
+            "user": "payment_svc",
+            "host": "10.20.5.23:39210",
+            "command": "Query",
+            "time_seconds": 42,
+            "state": "Waiting for row lock",
+            "waiting_for": "row lock held by session 10482",
+            "sql": "UPDATE account_balance SET balance = balance - ? WHERE account_id = ?"
+          },
+          {
+            "id": 10774,
+            "user": "payment_svc",
+            "host": "10.20.5.24:39288",
+            "command": "Query",
+            "time_seconds": 41,
+            "state": "updating",
+            "waiting_for": "row lock held by session 10482",
+            "sql": "UPDATE account_balance SET balance = balance - ? WHERE account_id = ?"
+          },
+          {
+            "id": 10801,
+            "user": "payment_svc",
+            "host": "10.20.5.25:40112",
+            "command": "Query",
+            "time_seconds": 39,
+            "state": "updating",
+            "waiting_for": "row lock held by session 10482",
+            "sql": "UPDATE account_balance SET balance = balance - ? WHERE account_id = ?"
+          }
+        ],
+        "waiting_session_count": 37,
+        "note": "只展示有代表性的会话；完整列表已保存为证据。"
+      },
+      "details": {
+        "summary": "阻塞会话 10482 属于 finance_batch，执行批量 UPDATE 已 68 秒；支付会话 10771 等 37 个会话在等待其行锁",
+        "topic": {
+          "facts": [
+            {
+              "key": "mysql.session.batch_update",
+              "statement": "会话 10482（finance_batch@10.20.3.17）执行批量 UPDATE 已 68 秒，语句按 merchant_id 更新 PENDING 账户；支付服务会话在等待其行锁",
+              "data": {
+                "blocking_session_id": 10482,
+                "user": "finance_batch",
+                "host": "10.20.3.17",
+                "exec_seconds": 68,
+                "sql": "UPDATE account_balance SET frozen = frozen + ? WHERE merchant_id = ? AND status = 'PENDING'",
+                "waiting_sessions": 37,
+                "payment_user": "payment_svc"
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "batch_without_batching",
+              "statement": "财务批量任务单事务更新大量账户行，是阻塞支付更新的直接来源",
+              "status": "supported"
+            },
+            {
+              "key": "application_retry_amplification",
+              "statement": "支付服务重试可能继续增加等待会话，但它是结果放大因素，不是根因",
+              "status": "candidate"
+            }
+          ],
+          "open_questions": [
+            "需要确认财务任务是否有分批提交逻辑",
+            "需要确认支付重试是否会造成重复扣款"
+          ],
+          "next_steps": [
+            "暂停或限速财务批量任务",
+            "评估分批提交和索引方案",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    }
+  }
+}

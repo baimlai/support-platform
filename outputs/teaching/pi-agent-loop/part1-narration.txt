@@ -1,0 +1,45 @@
+上一讲，我们用一个小项目，把 Agent Loop 的四步讲了一遍：准备上下文、调模型、执行工具、把结果写回去。那一讲解决的是"它是怎么转的"。这一讲我们升级难度，直接打开 Pi 的原版 TypeScript 源码，看它在真实工程里，怎么把这一圈做得可扩展、可观察、可恢复。
+
+先交代版本。我们读的是 Pi 仓库在 2026 年 10 月 29 日固定的一个提交，具体提交号写在讲义里。核心文件三个：agent loop 九百五十九行，agent 六百二十三行，types 五百三十九行；再加上 pi A I 里的消息类型、transcript、事件流和参数校验。所有结论都对这份代码负责，不拿我们的 Python 移植版冒充 Pi。
+
+先看分层。Pi 把 Agent 分成两层：pi A I 负责模型协议、消息类型、流式事件、工具声明和参数校验；pi agent core 负责循环和状态；最上面是宿主，提供模型、工具、上下文策略和界面。
+
+这个分层的关键，是一句话：Agent 内部一直用 AgentMessage，只有在调用模型的那一刻，才转换成模型能懂的 Message。为什么内部要保留一套自己的消息类型？因为真实产品里，对话里不只有用户、助手和工具结果，还可能有通知、工件、审批状态、界面提示。这些消息要进 transcript，要能回放，但不应该发给模型。Pi 的办法是：AgentMessage 可以是自定义类型，调用模型前用 convert to LLM 过滤或者转换。这样，业务消息和模型消息解耦，内核不需要认识你的业务。
+
+模型这一侧也被抽象成一个函数：stream function。它接收模型、transcript 和选项，返回一个助手消息事件流。契约写得很硬：不许抛异常；请求失败、模型失败，都必须编码成流里的 error 事件，最后给一条 stop reason 是 error 或者 aborted 的助手消息。为什么这么设计？因为上层只处理一种东西：事件流。成功和失败走同一条管道，记录、UI、重试都好写。
+
+现在进入入口。agent loop 这个函数很短：它创建一个 event stream，把 run agent loop 跑起来，事件往流里推，最后用 messages 结束流。注意，它是后台跑，不阻塞返回。调用方可以一边异步迭代消费事件，一边在最后等 result 拿完整消息。一个接口，两种用法：看过程，或者等结果。
+
+agent loop continue 是它的兄弟：不从新提示词开始，而是从已有上下文继续。它有两个硬限制：上下文不能为空；最后一条消息不能是助手消息。因为大多数模型不接受"以助手消息结尾"的请求，必须由用户消息或者工具结果来触发下一轮。这个检查放在入口，比让 provider 报错更早、更清楚。
+
+真正有意思的是 run agent loop 的第一行：declare tool changes。它做的事，是在把新提示词放进上下文之前，先比较两样东西：当前可执行的工具集合，和 transcript 里已经声明过的工具集合。如果不一样，就插入或者合并一条系统消息，里面写 tools added 和 tools removed。换句话说，Pi 不把工具列表当成请求旁边的一个附属参数，而是把工具声明写进对话历史，作为 transcript 的一部分。为什么？三个原因：第一，历史可回放，任何时候重放 transcript 都能得到当时的工具集合；第二，持久化简单，存消息就够了；第三，provider 缓存友好，工具声明变化有明确的边界。这个设计后面还会展开，它是 Pi 最有辨识度的地方，也是它最复杂的地方。
+
+然后发 agent start、turn start，把提示词消息发出去，进入 run loop。run loop 是整份代码的核心，它不是一个简单的 while，而是两层循环。外层循环处理 follow up：当 Agent 本来要停下来时，如果用户又排了一条后续消息，就再开一轮。内层循环处理工具调用和 steering：工具还在跑的时候，用户插进来的消息叫 steering；它会在当前这一轮工具执行完之后注入，不影响已经发出的工具调用。
+
+为什么要分两层？因为这两种消息的语义不同。Steering 是"改方向"，它要在下一次模型请求前生效；follow up 是"追加任务"，它要等 Agent 自然停下来之后才生效。很多 Agent 框架把两者混成一个队列，结果要么打断得太早，要么该停的时候停不下来。Pi 用两个队列、两个取消息的时机，把这两种语义分开了。
+
+内层循环每一轮做这些事：如果有上一轮完成的快照，先调 prepare next turn。这个钩子可以替换上下文、追加消息、换模型、换思考等级。典型用途是压缩上下文：上一轮结束后，先把历史压缩，再开始下一轮。然后发 turn start，把准备好的消息和 steering 消息做一次工具声明 diff，逐条发 message start 和 message end，写进上下文。接着调 prepare request，在每一次模型请求前，允许宿主替换上下文、模型和思考等级。注意，prepare request 和 prepare next turn 不一样：前者是"每次请求前"，包括第一次；后者是"上一轮结束后、下一轮开始前"。一个管请求，一个管轮次。这两个钩子给了宿主很大的控制权，也把责任交给了宿主：Pi 只给机制，不给策略。
+
+之后就是 stream assistant response：转换上下文、调模型、处理流式事件。拿到助手消息后，如果 stop reason 是 error 或者 aborted，走硬退出：finish turn、turn end、agent end，直接返回。否则筛出工具调用。如果 stop reason 是 length，说明输出被 token 上限截断了，工具参数可能是"能解析、但不完整"的。Pi 的处理很保守：这一批工具调用一个都不执行，全部返回错误，让模型重新发。这个细节很值得学，因为流式 JSON 解析器经常会把截断的参数"尽量补全"，看起来合法，实际上少了条件。
+
+工具执行完，结果写回上下文。然后调 finish turn，让它决定是 end 还是 continue。发 turn end。如果是 end，结束；否则看看还有没有工具调用，或者有没有 steering。有就继续内层循环；没有就跳出内层，检查 follow up。有 follow up 就继续外层；没有就结束。
+
+这里有一个很容易踩的坑，Pi 的 README 专门写了：finish turn 如果无条件返回 continue，就会无限循环。因为每一轮结束它都说"再来一轮"，而"再来一轮"本身又会触发下一轮 finish turn。框架把控制权给你，也把死循环的风险给你。
+
+接下来看 stream assistant response，这是 Pi 和模型之间的边界。顺序是：先 transform context，在 AgentMessage 层面裁剪旧消息、注入外部上下文；再 convert to LLM，把自定义消息过滤或者转换成模型能懂的四种消息；再 normalize context，把系统提示词和工具声明折叠进一条 leading system message；然后动态解析 API key。注意，get API key 是每一次请求都调用的，不是启动时调一次。这是为了短时令牌，比如 OAuth token 在长时间工具执行期间过期。解析完 key，才调 stream function。
+
+流式事件的处理也很细。start 时先把一条空的部分消息放进上下文，发 message start。之后 text start、text delta、text end、thinking start、thinking delta、thinking end、tool call start、tool call delta、tool call end，每一帧都带着"到目前为止的完整 partial 消息"；循环用最新的 partial 覆盖上下文里的临时消息，发 message update。done 或者 error 时，用最终消息替换临时消息，发 message end。如果流在没有 done 或 error 的情况下结束，代码会去等 result。这里有一个隐含假设：stream function 必须遵守契约，最终一定发 done 或 error。如果它不发，result 可能永远不返回。也就是说，低层循环信任适配器，不做防御性兜底。我们的 Python 移植版在这里加了一条"流没有 done 或 error 就按错误处理"，这是有意的差异，后面讲优缺点时会用到。
+
+最后看工具执行，这是 Pi 工程量最大的部分。execute tool calls 先判断执行模式：全局配置可能是 parallel，但如果这一批里任何一个工具的 execution mode 是 sequential，整批都按 sequential 跑。为什么整批降级？因为 sequential 的工具可能有副作用，不能和别的工具并发；一旦有一个要求顺序，整批就必须有序。
+
+Sequential 模式很直白：对每个调用，发 tool execution start；prepare；execute；finalize；发 tool execution end；生成 tool result message；发 message start 和 message end；再下一个。
+
+Parallel 模式更巧。它先顺序地做 preflight：对每个调用发 start、找工具、校验参数、跑 before tool call。注意，preflight 是顺序的，所以校验和权限检查不会并发。preflight 通过后，把真正的执行包成一个函数，放进数组。然后 Promise all 并发执行。每个工具执行完，立刻发 tool execution end，所以结束事件的顺序是完成顺序。但是，工具结果消息不按完成顺序发，而是等所有工具结束后，按助手消息里的原始顺序发。这样 transcript 里的结果顺序和工具调用顺序一致，模型和回放都不会乱。这个设计很值得记：并发执行，顺序落账。
+
+prepare tool call 里还有几个细节。第一，prepare arguments 是给老工具做参数兼容的，在 schema 校验之前跑。第二，validate tool arguments 用的是 TypeBox 编译出来的校验器，而且做了大量类型强制转换：字符串转数字、数字转布尔、可选字段的 null 删除等等。它的目标是"让模型给的参数尽量能用"，而不是"严格拒绝"。第三，before tool call 在参数校验之后跑，拿到的是已经验证、已经转换的参数；它可以 block，也可以带 terminate。第四，每个关键点都检查 abort signal，取消之后不再执行。
+
+execute prepared tool call 负责真正执行。它把 abort signal 传进去，把 on update 回调传进去；工具可以流式汇报进度，产生 tool execution update 事件。工具抛异常，不往外炸，而是变成 is error 的结果。执行时间用单调时钟量，记录 duration。after tool call 在执行之后跑，可以按字段覆盖结果：content、details、usage、terminate、structured content。注意一个细节：如果 after tool call 替换了 content，但没有给 structured content，原来的 structured content 会被删掉，因为内容和结构化数据可能已经对不上了。
+
+所有工具错误都走同一条路：找不到工具、参数不合法、被 before 拦截、执行抛异常、取消，全部变成 is error 的 tool result，交给模型继续判断。整个工具执行函数不会因为单个工具失败而 reject。这就是 Pi 的"失败也是数据"。另外，只有这一批所有结果都 terminate，循环才提前结束；混合批次继续。
+
+上半场到这里。我们讲完了入口、双层循环、流式边界和工具执行。下半场，我们看 Pi 最独特的那部分：把提示词、工具声明、工具增删都写进 transcript，做成可回放的状态；然后看 Agent 包装类怎么把这些事件变成状态、队列和生命周期；最后，集中讲 Pi 的设计特点、优点、代价，以及哪些值得我们这个小平台借鉴，哪些不要抄。

@@ -1,0 +1,26 @@
+[project]
+name = "support-platform"
+version = "0.1.0"
+description = "DBA 工单 Agent 小平台（Python 后端）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1",
+    # 只用来校验模拟工具的参数；后面接真实工具时也可以继续复用。
+    "httpx>=0.28,<1",
+    "jsonschema>=4.23,<5",
+    "mcp>=1.20,<2",
+    "uvicorn[standard]>=0.32,<1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

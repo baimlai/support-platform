@@ -1,0 +1,28 @@
+{
+  "mock": true,
+  "ticket_id": "TCK-REDIS-MEM-006",
+  "title": "商品缓存命中率骤降，Redis 内存接近上限",
+  "description": "商品缓存命中率从 94% 降到 61%，Redis 已用内存达到 maxmemory 的 99%，监控显示 evicted_keys 持续增长。",
+  "symptom": "Redis 内存接近 maxmemory，持续淘汰 key，商品缓存命中率明显下降。",
+  "tenant_id": "tenant-demo",
+  "instance_id": "redis-cache-006",
+  "database": "0",
+  "database_type": "redis",
+  "scenario_id": "redis-memory-eviction-001",
+  "scenario_label": "Redis 内存达到上限触发持续淘汰",
+  "scenario_mode": true,
+  "skill": "dba-triage",
+  "dataset": "fixtures/mock_dba/redis_memory_eviction_001.json",
+  "scenario_order": 60,
+  "time_range": {
+    "start": "2026-10-29T10:00:00+08:00",
+    "end": "2026-10-29T11:00:00+08:00"
+  },
+  "investigation_plan": [
+    "查看 Redis 内存、淘汰策略和命中率",
+    "统计大 Key 与无过期时间的 Key",
+    "汇总证据并输出报告"
+  ],
+  "source": "fixture",
+  "mock_note": "工单和工具结果均为模拟数据，仅用于演示 Redis 内存淘汰排查流程。"
+}

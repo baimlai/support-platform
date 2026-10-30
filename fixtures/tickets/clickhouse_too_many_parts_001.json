@@ -1,0 +1,28 @@
+{
+  "mock": true,
+  "ticket_id": "TCK-CH-PARTS-010",
+  "title": "埋点写入大量失败，报 Too many parts",
+  "description": "埋点服务在高峰期出现大量 INSERT 失败，ClickHouse 返回 Code 252 Too many parts，写入频率约每秒 6 批、每批只有几十行。",
+  "symptom": "ClickHouse 埋点表 INSERT 失败，异常为 Too many parts，写入批次又小又频繁。",
+  "tenant_id": "tenant-demo",
+  "instance_id": "ch-analytics-010",
+  "database": "analytics",
+  "database_type": "clickhouse",
+  "scenario_id": "clickhouse-too-many-parts-001",
+  "scenario_label": "ClickHouse 小批量高频写入导致 Parts 积压",
+  "scenario_mode": true,
+  "skill": "dba-triage",
+  "dataset": "fixtures/mock_dba/clickhouse_too_many_parts_001.json",
+  "scenario_order": 100,
+  "time_range": {
+    "start": "2026-10-29T10:00:00+08:00",
+    "end": "2026-10-29T11:00:00+08:00"
+  },
+  "investigation_plan": [
+    "查询 ClickHouse 失败写入日志",
+    "查看活跃 parts 和 merge 积压",
+    "汇总证据并输出报告"
+  ],
+  "source": "fixture",
+  "mock_note": "工单和工具结果均为模拟数据，仅用于演示 ClickHouse Parts 积压排查流程。"
+}

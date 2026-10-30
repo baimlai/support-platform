@@ -1,0 +1,307 @@
+{
+  "mock": true,
+  "dataset_id": "redis-hot-key-001",
+  "database_type": "redis",
+  "instance_id": "redis-cluster-005",
+  "database": "0",
+  "scenario": {
+    "label": "Redis 单分片热 Key 导致延迟升高",
+    "search_query": "Redis 热key 访问次数 分片 CPU slowlog 内存",
+    "steps": [
+      {
+        "tool": "redis_key_stats",
+        "label": "访问次数最高的 Key",
+        "args": {
+          "instance_id": "$instance_id",
+          "limit": 10
+        },
+        "reason": "先统计访问次数最高的 Key，确认是否存在明显高于其他 Key 的热点，以及热点落在哪个分片。"
+      },
+      {
+        "tool": "redis_info",
+        "label": "各分片 CPU 与吞吐",
+        "args": {
+          "instance_id": "$instance_id",
+          "section": "all"
+        },
+        "reason": "热 Key 只有和分片资源对上才能解释延迟，继续查各分片 CPU、op/s、连接数和内存。"
+      },
+      {
+        "tool": "redis_slowlog",
+        "label": "慢命令与延迟",
+        "args": {
+          "instance_id": "$instance_id",
+          "limit": 10
+        },
+        "reason": "最后查 SLOWLOG，确认热点命令的实际耗时和服务端排队情况。"
+      }
+    ],
+    "diagnosis": {
+      "root_cause": "商品详情接口对同一个活动配置 Key `promo:2026:home:banner` 持续执行 GET，约 82000 QPS 全部落到分片 3；该分片 CPU 达到 94%，请求在服务端排队，导致商品详情 p99 升高。这不是集群整体内存或网络问题。",
+      "confidence": "高",
+      "evidence_keys": [
+        "redis.hot_key",
+        "redis.shard.cpu",
+        "redis.slowlog.get"
+      ],
+      "boundary": "当前能定位到热 Key 和单分片 CPU，但未查看客户端连接池和代理路由配置；修复后仍需验证流量是否均匀。",
+      "fix": {
+        "primary": [
+          "在商品详情服务增加本地缓存（例如 1~5 秒 TTL），把同一活动配置的重复 GET 挡在 Redis 之前。",
+          "评估把热点 Key 拆成多个副本 Key（例如 `promo:2026:home:banner:{0..9}`），由客户端随机读，分散单分片压力。",
+          "读多写少的活动配置可以使用只读副本或专门缓存层，避免所有请求集中到一个主分片。"
+        ],
+        "alternate": [
+          "如果业务允许，把活动配置推送到 CDN 或应用配置中心，减少 Redis 读放大。",
+          "短期扩容分片 3 所在节点，但热点 Key 不拆分时扩容收益有限。"
+        ],
+        "mitigation": [
+          "对商品详情接口限流，优先保护下单链路。",
+          "临时把活动配置的 TTL 调长，减少回源，但不能解决单 Key 热点的 CPU 消耗。"
+        ]
+      },
+      "excluded": [
+        "Redis 内存不足：INFO 显示 used_memory 约 6.2GB / 8GB，没有触发 maxmemory 淘汰。",
+        "集群网络故障：三个分片都能响应，延迟集中在分片 3 的 CPU，不是网络超时。"
+      ],
+      "pending": [
+        "需要确认客户端是否使用集群代理，以及代理是否支持按 Key 后缀打散。",
+        "需要确认活动配置变更频率，决定本地缓存 TTL 的上限。"
+      ],
+      "verification": [
+        "上线本地缓存或 Key 拆分后，观察分片 3 CPU 是否降到 60% 以下、其他分片是否分担流量。",
+        "对比商品详情接口 p99 和 Redis GET 的 QPS。",
+        "检查 SLOWLOG 是否还持续出现同一个 Key 的慢命令。"
+      ],
+      "limitations": [
+        "没有采集客户端侧连接池和超时配置，无法判断重试放大了多少流量。",
+        "热 Key 统计来自模拟采样，真实环境应使用 `HOTKEYS` 或代理监控交叉确认。"
+      ]
+    }
+  },
+  "tool_results": {
+    "redis_key_stats": {
+      "payload": {
+        "mock": true,
+        "instance_id": "redis-cluster-005",
+        "collected_at": "2026-10-29T10:18:00+08:00",
+        "top_keys": [
+          {
+            "key": "promo:2026:home:banner",
+            "qps": 82000,
+            "value_bytes": 1843,
+            "ttl_seconds": 1800,
+            "shard": 3,
+            "node": "172.20.5.13:6379",
+            "commands": ["GET"]
+          },
+          {
+            "key": "product:detail:88301",
+            "qps": 4200,
+            "value_bytes": 9214,
+            "ttl_seconds": 120,
+            "shard": 1,
+            "node": "172.20.5.11:6379",
+            "commands": ["HGETALL"]
+          },
+          {
+            "key": "user:session:9f2c",
+            "qps": 2100,
+            "value_bytes": 620,
+            "ttl_seconds": 900,
+            "shard": 2,
+            "node": "172.20.5.12:6379",
+            "commands": ["GET"]
+          }
+        ],
+        "scan_note": "基于代理采样统计访问次数，没有遍历全库。",
+        "note": "数据为模拟采样，仅用于演示热 Key 定位。"
+      },
+      "details": {
+        "summary": "`promo:2026:home:banner` 约 82000 QPS，是第二名的 19 倍，落在分片 3；其他热点 Key QPS 都在 5000 以下",
+        "topic": {
+          "facts": [
+            {
+              "key": "redis.hot_key",
+              "statement": "Key `promo:2026:home:banner` 约 82000 QPS，是第二名的 19 倍，TTL 1800 秒、value 1.8KB，全部落在分片 3",
+              "data": {
+                "key": "promo:2026:home:banner",
+                "qps": 82000,
+                "value_bytes": 1843,
+                "ttl_seconds": 1800,
+                "shard": 3,
+                "node": "172.20.5.13:6379",
+                "commands": ["GET"]
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "hot_key",
+              "statement": "存在一个访问量远超其他 Key 的热点，且集中在单个分片",
+              "status": "supported"
+            }
+          ],
+          "open_questions": [
+            "需要确认这个 Key 是否被多个应用重复读取"
+          ],
+          "next_steps": [
+            "查看各分片 CPU 和 op/s",
+            "查看 SLOWLOG 延迟",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    },
+    "redis_info": {
+      "payload": {
+        "mock": true,
+        "instance_id": "redis-cluster-005",
+        "collected_at": "2026-10-29T10:18:05+08:00",
+        "cluster": {
+          "total_ops_per_sec": 190000,
+          "connected_clients": 3200,
+          "used_memory_gb": 6.2,
+          "maxmemory_gb": 8.0,
+          "evicted_keys": 0
+        },
+        "shards": [
+          {
+            "shard": 1,
+            "node": "172.20.5.11:6379",
+            "cpu_percent": 24,
+            "ops_per_sec": 42000
+          },
+          {
+            "shard": 2,
+            "node": "172.20.5.12:6379",
+            "cpu_percent": 27,
+            "ops_per_sec": 45000
+          },
+          {
+            "shard": 3,
+            "node": "172.20.5.13:6379",
+            "cpu_percent": 94,
+            "ops_per_sec": 103000
+          }
+        ],
+        "note": "分片级指标来自模拟集群监控。"
+      },
+      "details": {
+        "summary": "分片 3 CPU 94%、103000 op/s，分片 1/2 分别 24%/27%；集群内存 6.2GB/8GB 且无淘汰",
+        "topic": {
+          "facts": [
+            {
+              "key": "redis.shard.cpu",
+              "statement": "分片 3（172.20.5.13:6379）CPU 94%、约 103000 op/s，分片 1/2 仅 24%/27%；集群内存 6.2GB/8GB，淘汰 key 为 0",
+              "data": {
+                "shard": 3,
+                "node": "172.20.5.13:6379",
+                "cpu_percent": 94,
+                "ops_per_sec": 103000,
+                "other_shard_cpu": [24, 27],
+                "used_memory_gb": 6.2,
+                "maxmemory_gb": 8.0,
+                "evicted_keys": 0
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "single_shard_cpu",
+              "statement": "延迟集中在单分片 CPU，符合热 Key 而不是全局内存问题",
+              "status": "supported"
+            },
+            {
+              "key": "memory_pressure",
+              "statement": "内存压力导致淘汰",
+              "status": "unverified"
+            }
+          ],
+          "open_questions": [
+            "需要确认分片 3 是否有其他高消耗命令"
+          ],
+          "next_steps": [
+            "查看 SLOWLOG",
+            "评估本地缓存或 Key 拆分",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    },
+    "redis_slowlog": {
+      "payload": {
+        "mock": true,
+        "instance_id": "redis-cluster-005",
+        "collected_at": "2026-10-29T10:18:12+08:00",
+        "slowlog": [
+          {
+            "entry_id": 8821,
+            "timestamp": "2026-10-29T10:17:58+08:00",
+            "command": "GET promo:2026:home:banner",
+            "duration_ms": 12.8,
+            "client_addr": "10.30.7.21:58214",
+            "shard": 3
+          },
+          {
+            "entry_id": 8820,
+            "timestamp": "2026-10-29T10:17:57+08:00",
+            "command": "GET promo:2026:home:banner",
+            "duration_ms": 11.4,
+            "client_addr": "10.30.7.21:58213",
+            "shard": 3
+          },
+          {
+            "entry_id": 8818,
+            "timestamp": "2026-10-29T10:17:55+08:00",
+            "command": "HGETALL product:detail:88301",
+            "duration_ms": 5.2,
+            "client_addr": "10.30.7.22:41002",
+            "shard": 1
+          }
+        ],
+        "slowlog_threshold_ms": 10,
+        "note": "模拟 SLOWLOG，只展示有代表性的条目。"
+      },
+      "details": {
+        "summary": "分片 3 的 GET `promo:2026:home:banner` 出现 11~13ms 慢命令；同集群其他 Key 约 5ms",
+        "topic": {
+          "facts": [
+            {
+              "key": "redis.slowlog.get",
+              "statement": "分片 3 的 `GET promo:2026:home:banner` 命中 SLOWLOG，耗时 11.4~12.8ms；对照 Key 的 HGETALL 约 5.2ms",
+              "data": {
+                "command": "GET promo:2026:home:banner",
+                "duration_ms": 12.8,
+                "shard": 3,
+                "slowlog_threshold_ms": 10,
+                "control_command_ms": 5.2
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "hot_key_latency",
+              "statement": "热 Key 的命令耗时升高，与分片 CPU 饱和一致",
+              "status": "supported"
+            }
+          ],
+          "open_questions": [
+            "需要确认客户端超时和重试是否进一步放大流量"
+          ],
+          "next_steps": [
+            "增加本地缓存或拆分 Key",
+            "观察分片 CPU 和 p99",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    }
+  }
+}

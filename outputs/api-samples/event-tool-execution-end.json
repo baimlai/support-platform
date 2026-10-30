@@ -1,0 +1,54 @@
+{
+  "seq": 14,
+  "ts": 1793331496067,
+  "type": "tool_execution_end",
+  "turn": 1,
+  "data": {
+    "tool_call_id": "call-1",
+    "tool_name": "slow_log_query",
+    "result": {
+      "content": [
+        {
+          "text": "{\n  \"truncated\": true,\n  \"evidence_id\": \"ev-000001\",\n  \"tool_name\": \"slow_log_query\",\n  \"size_chars\": 16658,\n  \"max_inline_chars\": 4000,\n  \"preview\": \"{\\n  \\\"mock\\\": true,\\n  \\\"source\\\": \\\"slow_log_service (mock)\\\",\\n  \\\"instance_id\\\": \\\"db-mysql-001\\\",\\n  \\\"requested_range\\\": {\\n    \\\"start\\\": \\\"2026-10-29T10:00:00+08:00\\\",\\n    \\\"end\\\": \\\"2026-10-29T11:00:00+08:00\\\"\\n  },\\n  \\\"coverage\\\": {\\n    \\\"start\\\": \\\"2026-10-29T10:00:00+08:00\\\",\\n    \\\"end\\\": \\\"2026-10-29T11:00:00+08:00\\\",\\n    \\\"coverage_ratio\\\": 0.92,\\n    \\\"note\\\": \\\"慢日志采样覆盖率约 92%，不代表全量请求\\\"\\n  },\\n  \\\"row_count\\\": 50,\\n  \\\"rows\\\": [\\n    {\\n      \\\"sql_fingerprint\\\": \\\"a1b2c3d4e5f6\\\",\\n      \\\"sample_sql\\\": \\\"SELECT id, order_no, status, created_at FROM orders WHERE user_id = ? AND status IN (?, ?) ORDER BY created_at DESC LIMIT 20\\\",\\n      \\\"count\\\": 1240,\\n      \\\"avg_latency_ms\\\": 2380,\\n      \\\"max_latency_ms\\\": 8120,\\n      \\\"avg_rows_examined\\\": 185000,\\n      \\\"avg_rows_sent\\\": 20,\\n      \\\"first_seen\\\": \\\"2026-10-29T10:03:00+08:00\\\"\\n    },\\n    {\\n      \\\"sql_fingerprint\\\": \\\"d4e5f6a1b2c3\\\",\\n      \\\"sample_sql\\\": \\\"SELECT date(created_at) AS day, sum(amount) FROM orders GROUP BY day ORDER BY day DESC LIMIT 7\\\",\\n      \\\"count\\\": 12,\\n      \\\"avg_latency_ms\\\": 960,\\n      \\\"max_latency_ms\\\": 2200,\\n      \\\"avg_rows_examined\\\": 42000,\\n      \\\"avg_rows_sent\\\": 7,\\n      \\\"first_seen\\\": \\\"2026-10-29T10:20:00+08:00\\\"\\n    },\\n    {\\n      \\\"sql_fingerprint\\\": \\\"77a26be63216\\\",\\n      \\\"sample_sql\\\": \\\"SELECT id, order_no FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT ?\\\",\\n      \\\"count\\\": 115,\\n      \\\"avg_la\",\n  \"summary\": {\n    \"mock\": true,\n    \"source\": \"slow_log_service (mock)\",\n    \"row_count\": 50,\n    \"coverage_ratio\": 0.92,\n    \"coverage_note\": \"慢日志采样覆盖率约 92%，不代表全量请求\",\n    \"top\": {\n      \"sql_fingerprint\": \"a1b2c3d4e5f6\",\n      \"sample_sql\": \"SELECT id, order_no, status, created_at FROM orders WHERE user_id = ? AND status IN (?, ?) ORDER BY created_at DESC LIMIT 20\",\n      \"count\": 1240,\n      \"avg_latency_ms\": 2380,\n      \"max_latency_ms\": 8120,\n      \"avg_rows_examined\": 185000,\n      \"avg_rows_sent\": 20\n    },\n    \"stats\": {\n      \"returned_rows\": 50,\n      \"fingerprint_count\": 50,\n      \"max_avg_latency_ms\": 2380,\n      \"min_avg_latency_ms\": 41,\n      \"total_count\": 6292\n    }\n  },\n  \"next\": \"完整原始结果已保存。需要更多内容时调用 evidence_read(evidence_id=\\\"ev-000001\\\", offset=0, limit=4000)。\"\n}",
+          "type": "text"
+        }
+      ],
+      "details": {
+        "mock": true,
+        "source": "slow_log_service (mock)",
+        "row_count": 50,
+        "coverage_ratio": 0.92,
+        "coverage_note": "慢日志采样覆盖率约 92%，不代表全量请求",
+        "top": {
+          "sql_fingerprint": "a1b2c3d4e5f6",
+          "sample_sql": "SELECT id, order_no, status, created_at FROM orders WHERE user_id = ? AND status IN (?, ?) ORDER BY created_at DESC LIMIT 20",
+          "count": 1240,
+          "avg_latency_ms": 2380,
+          "max_latency_ms": 8120,
+          "avg_rows_examined": 185000,
+          "avg_rows_sent": 20
+        },
+        "stats": {
+          "returned_rows": 50,
+          "fingerprint_count": 50,
+          "max_avg_latency_ms": 2380,
+          "min_avg_latency_ms": 41,
+          "total_count": 6292
+        }
+      },
+      "is_error": false,
+      "terminate": false,
+      "duration_ms": 0,
+      "meta": {
+        "evidence_id": "ev-000001",
+        "truncated": true,
+        "raw_size_chars": 16658,
+        "max_inline_chars": 4000
+      }
+    },
+    "is_error": false,
+    "duration_ms": 0,
+    "turn": 1,
+    "evidence_id": "ev-000001"
+  }
+}

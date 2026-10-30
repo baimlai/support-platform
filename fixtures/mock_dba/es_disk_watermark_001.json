@@ -1,0 +1,252 @@
+{
+  "mock": true,
+  "dataset_id": "es-disk-watermark-001",
+  "database_type": "elasticsearch",
+  "instance_id": "es-logs-009",
+  "database": "logs-2026.10",
+  "scenario": {
+    "label": "Elasticsearch 磁盘高水位导致副本无法分配",
+    "search_query": "Elasticsearch 集群 yellow 未分配副本 磁盘水位 allocation explain",
+    "steps": [
+      {
+        "tool": "es_cluster_health",
+        "label": "集群健康与未分配分片",
+        "args": {
+          "instance_id": "$instance_id",
+          "start_time": "$start_time",
+          "end_time": "$end_time"
+        },
+        "reason": "先看 cluster health，确认是 yellow 还是 red、多少副本未分配、涉及哪些索引，以及节点数量是否正常。"
+      },
+      {
+        "tool": "es_shard_allocation",
+        "label": "分片分配失败原因",
+        "args": {
+          "instance_id": "$instance_id"
+        },
+        "reason": "健康状态只说明有副本没分配，继续查 allocation explain，确认是磁盘水位、节点离线还是其它分配规则在阻止分配。"
+      }
+    ],
+    "diagnosis": {
+      "root_cause": "日志索引的 ILM 策略没有真正绑定到新建索引，30 天前的日志没有被删除；三台数据节点磁盘使用率分别达到 91.2%、90.8%、92.4%，全部超过 90% 的 high watermark。Elasticsearch 因此拒绝把新索引的副本分配到这些节点，造成 48 个副本分片未分配、集群变为 yellow。",
+      "confidence": "高",
+      "evidence_keys": [
+        "es.cluster.health",
+        "es.disk.watermark"
+      ],
+      "boundary": "当前能确认副本未分配的直接原因是磁盘高水位，但还没有核对 ILM 策略配置和日志保留合规要求；删除索引前必须确认保留期限。",
+      "fix": {
+        "primary": [
+          "修复 ILM：确认索引模板绑定了正确的 lifecycle policy，并让 `logs-*` 新索引自动进入 hot→warm→delete 流程。",
+          "按保留策略删除或归档过期日志索引（例如 `logs-2026.08.*`），先把三台数据节点磁盘降到 85% 以下，再观察副本是否自动分配。",
+          "扩容数据节点磁盘或增加节点，给日志增长留出至少 20% 余量；高水位以下才允许新分片分配。"
+        ],
+        "alternate": [
+          "短期把副本数从 1 调整为 0 可以让集群变绿，但会降低冗余，只能作为临时手段。",
+          "对冷日志使用可搜索快照或对象存储归档，减少本地磁盘占用。"
+        ],
+        "mitigation": [
+          "临时调高 high watermark 只能掩盖问题并增加磁盘写满风险，不建议作为长期方案。",
+          "暂停非关键日志写入或降低采样率，避免磁盘继续逼近 flood watermark。"
+        ]
+      },
+      "excluded": [
+        "节点离线：cluster health 显示 5 个节点全部在线，没有节点丢失。",
+        "分片损坏：没有 unassigned 主分片，只有副本未分配，且 explain 返回磁盘水位原因。",
+        "网络分区：节点间通信正常，主分片全部处于 started 状态。"
+      ],
+      "pending": [
+        "需要确认日志法定保留期限，避免误删合规数据。",
+        "需要检查索引模板为什么没有把 ILM policy 应用到 9 月和 10 月的新索引。"
+      ],
+      "verification": [
+        "清理过期索引后观察 `_cluster/health` 的 unassigned_shards 是否从 48 降到 0、status 是否变绿。",
+        "用 `_cluster/allocation/explain` 再次检查目标分片，确认不再报 watermark 错误。",
+        "持续观察 7 天磁盘增长曲线，确认 ILM 能按天删除过期索引。"
+      ],
+      "limitations": [
+        "模拟数据只展示代表性节点的磁盘使用率，没有包含完整索引清单。",
+        "没有访问真实 ILM 配置，策略未生效的具体原因需要到集群侧核对。"
+      ]
+    }
+  },
+  "tool_results": {
+    "es_cluster_health": {
+      "payload": {
+        "mock": true,
+        "instance_id": "es-logs-009",
+        "collected_at": "2026-10-29T10:24:00+08:00",
+        "cluster_name": "logs-prod",
+        "status": "yellow",
+        "number_of_nodes": 5,
+        "number_of_data_nodes": 3,
+        "active_primary_shards": 192,
+        "active_shards": 336,
+        "unassigned_shards": 48,
+        "unassigned_primary_shards": 0,
+        "indices": {
+          "logs-2026.09.28": {"health": "yellow", "primary": 12, "replica": 0, "unassigned_replicas": 12},
+          "logs-2026.10.27": {"health": "yellow", "primary": 12, "replica": 0, "unassigned_replicas": 12},
+          "logs-2026.10.28": {"health": "yellow", "primary": 12, "replica": 0, "unassigned_replicas": 12},
+          "logs-2026.10.29": {"health": "yellow", "primary": 12, "replica": 0, "unassigned_replicas": 12}
+        },
+        "note": "集群健康数据为模拟快照；只列出有未分配副本的索引。"
+      },
+      "details": {
+        "summary": "集群 yellow，336 个活跃分片中有 48 个副本未分配，主分片全部正常；涉及 4 个近期日志索引，每索引 12 个副本",
+        "topic": {
+          "facts": [
+            {
+              "key": "es.cluster.health",
+              "statement": "集群 `logs-prod` 状态 yellow，5 个节点（3 个数据节点）全部在线，48 个副本分片未分配、主分片全部正常；未分配集中在 logs-2026.09.28、10.27、10.28、10.29 四个索引",
+              "data": {
+                "status": "yellow",
+                "number_of_nodes": 5,
+                "number_of_data_nodes": 3,
+                "active_primary_shards": 192,
+                "active_shards": 336,
+                "unassigned_shards": 48,
+                "unassigned_primary_shards": 0,
+                "affected_indices": [
+                  "logs-2026.09.28",
+                  "logs-2026.10.27",
+                  "logs-2026.10.28",
+                  "logs-2026.10.29"
+                ]
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "replica_unassigned",
+              "statement": "只有副本未分配，主分片正常，问题在分片分配而不是数据损坏",
+              "status": "supported"
+            },
+            {
+              "key": "node_offline",
+              "statement": "节点离线导致副本无法分配",
+              "status": "unverified"
+            }
+          ],
+          "open_questions": [
+            "需要确认分配失败的具体原因"
+          ],
+          "next_steps": [
+            "查询 allocation explain",
+            "确认磁盘水位和保留策略",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    },
+    "es_shard_allocation": {
+      "payload": {
+        "mock": true,
+        "instance_id": "es-logs-009",
+        "collected_at": "2026-10-29T10:24:06+08:00",
+        "can_allocate": "no",
+        "allocate_explanation": "the node is above the high watermark cluster setting [cluster.routing.allocation.disk.watermark.high=90%], using more disk space than the maximum allowed [90.0%], actual free: [8.2%]",
+        "unassigned_shard": {
+          "index": "logs-2026.10.29",
+          "shard": 3,
+          "primary": false
+        },
+        "node_decisions": [
+          {
+            "node": "es-data-01",
+            "disk_total_gb": 2000,
+            "disk_used_gb": 1824,
+            "disk_used_percent": 91.2,
+            "watermark": "high",
+            "decision": "no"
+          },
+          {
+            "node": "es-data-02",
+            "disk_total_gb": 2000,
+            "disk_used_gb": 1816,
+            "disk_used_percent": 90.8,
+            "watermark": "high",
+            "decision": "no"
+          },
+          {
+            "node": "es-data-03",
+            "disk_total_gb": 2000,
+            "disk_used_gb": 1848,
+            "disk_used_percent": 92.4,
+            "watermark": "high",
+            "decision": "no"
+          }
+        ],
+        "watermarks": {
+          "low_percent": 85,
+          "high_percent": 90,
+          "flood_stage_percent": 95
+        },
+        "ilm": {
+          "policy_name": "logs-30d",
+          "expected_delete_after_days": 30,
+          "oldest_index": "logs-2026.07.18",
+          "policy_attached_to_recent_indices": false,
+          "note": "集群中存在 7 月以来的索引，说明删除阶段没有生效。"
+        },
+        "note": "allocation explain 为模拟返回；磁盘数据来自三个数据节点快照。"
+      },
+      "details": {
+        "summary": "三台数据节点磁盘使用率 90.8%~92.4%，全部超过 90% 高水位；分配器拒绝副本；ILM 策略未绑定到近期索引，7 月索引仍在",
+        "topic": {
+          "facts": [
+            {
+              "key": "es.disk.watermark",
+              "statement": "三台数据节点磁盘使用率分别为 91.2%、90.8%、92.4%，全部超过 high watermark 90%；allocation explain 明确返回磁盘高水位拒绝分配。ILM 策略 `logs-30d` 未绑定到近期索引，最老索引仍是 logs-2026.07.18",
+              "data": {
+                "data_nodes": [
+                  {"node": "es-data-01", "disk_used_percent": 91.2},
+                  {"node": "es-data-02", "disk_used_percent": 90.8},
+                  {"node": "es-data-03", "disk_used_percent": 92.4}
+                ],
+                "watermarks": {
+                  "low_percent": 85,
+                  "high_percent": 90,
+                  "flood_stage_percent": 95
+                },
+                "ilm_policy": "logs-30d",
+                "ilm_attached_to_recent_indices": false,
+                "oldest_index": "logs-2026.07.18"
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "disk_high_watermark",
+              "statement": "所有数据节点超过 high watermark，副本无法分配",
+              "status": "supported"
+            },
+            {
+              "key": "ilm_not_applied",
+              "statement": "ILM 删除阶段没有生效，导致磁盘持续增长",
+              "status": "supported"
+            },
+            {
+              "key": "node_offline",
+              "statement": "节点离线导致副本未分配",
+              "status": "excluded"
+            }
+          ],
+          "open_questions": [
+            "需要确认索引模板为什么没有绑定 ILM",
+            "需要确认日志保留期限"
+          ],
+          "next_steps": [
+            "清理过期索引释放磁盘",
+            "修复 ILM 绑定",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    }
+  }
+}

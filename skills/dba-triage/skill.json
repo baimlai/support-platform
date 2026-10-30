@@ -1,0 +1,8 @@
+{
+  "name": "dba-triage",
+  "label": "通用 DBA 分诊",
+  "version": "1",
+  "description": "面向 MySQL、PostgreSQL、Redis、MongoDB、Elasticsearch、ClickHouse 的只读故障分诊流程。",
+  "initial_tools": [],
+  "content_file": "SKILL.md"
+}

@@ -1,0 +1,42 @@
+[
+  {
+    "evidence_id": "ev-000001",
+    "tool_call_id": "call-1",
+    "tool_name": "slow_log_query",
+    "created_at": "2026-10-30T03:38:16.067393+00:00",
+    "size_chars": 16658,
+    "is_error": false,
+    "truncated": true,
+    "preview": "{\n  \"mock\": true,\n  \"source\": \"slow_log_service (mock)\",\n  \"instance_id\": \"db-mysql-001\",\n  \"requested_range\": {\n    \"start\": \"2026-10-29T10:00:00+08:00\",\n    \"end\": \"2026-10-29T11:00:00+08:00\"\n  },\n  \"coverage\": {\n    \"start\": \"2026-10-29T10:00:00+08:00\",\n    \"end\": \"2026-10-29T11:00:00+08:00\",\n   "
+  },
+  {
+    "evidence_id": "ev-000002",
+    "tool_call_id": "call-4",
+    "tool_name": "execution_plan",
+    "created_at": "2026-10-30T03:38:16.078888+00:00",
+    "size_chars": 604,
+    "is_error": false,
+    "truncated": false,
+    "preview": "{\n  \"mock\": true,\n  \"source\": \"explain_service (mock)\",\n  \"sql_fingerprint\": \"a1b2c3d4e5f6\",\n  \"plan\": [\n    {\n      \"id\": 1,\n      \"select_type\": \"SIMPLE\",\n      \"table\": \"orders\",\n      \"type\": \"ALL\",\n      \"possible_keys\": \"idx_user_created\",\n      \"key\": null,\n      \"key_len\": null,\n      \"ref\":"
+  },
+  {
+    "evidence_id": "ev-000003",
+    "tool_call_id": "call-5",
+    "tool_name": "instance_metrics",
+    "created_at": "2026-10-30T03:38:16.133893+00:00",
+    "size_chars": 56,
+    "is_error": true,
+    "truncated": false,
+    "preview": "实例监控接口超时（模拟）：等待 5 秒仍未返回，CPU、IO 等监控数据未获取到，不能据此判断实例负载是否正常。"
+  },
+  {
+    "evidence_id": "ev-000004",
+    "tool_call_id": "call-6",
+    "tool_name": "lock_wait_query",
+    "created_at": "2026-10-30T03:38:16.135599+00:00",
+    "size_chars": 407,
+    "is_error": false,
+    "truncated": false,
+    "preview": "{\n  \"mock\": true,\n  \"instance_id\": \"db-mysql-001\",\n  \"requested_range\": {\n    \"start\": \"2026-10-29T10:00:00+08:00\",\n    \"end\": \"2026-10-29T11:00:00+08:00\"\n  },\n  \"status\": \"no_data\",\n  \"samples\": [],\n  \"source\": \"lock_wait_service (mock)\",\n  \"coverage\": {\n    \"start\": \"2026-10-29T10:00:00+08:00\",\n  "
+  }
+]

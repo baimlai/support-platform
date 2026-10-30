@@ -1,0 +1,20 @@
+{
+  "mock": true,
+  "ticket_id": "TCK-20261029-001",
+  "tenant_id": "tenant-demo",
+  "title": "订单查询从今天 10 点开始明显变慢",
+  "description": "客户反馈订单列表查询从今天 10:00 左右开始明显变慢，部分请求超时。实例为 db-mysql-001，业务库为 shop_order，主要接口是订单列表查询。",
+  "instance_id": "db-mysql-001",
+  "database": "shop_order",
+  "database_type": "mysql",
+  "scenario_id": "mysql-slow-sql-001",
+  "scenario_label": "MySQL 慢查询缺少联合索引导致订单列表超时",
+  "scenario_order": 10,
+  "skill": "slow-sql",
+  "time_range": {
+    "start": "2026-10-29T10:00:00+08:00",
+    "end": "2026-10-29T11:00:00+08:00"
+  },
+  "symptom": "订单列表查询变慢，部分请求超时",
+  "mock_note": "此工单和后续工具数据均为模拟，仅用于验证 Agent 流程，不代表真实客户、实例或业务事实。"
+}

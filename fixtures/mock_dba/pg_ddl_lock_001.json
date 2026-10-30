@@ -1,0 +1,215 @@
+{
+  "mock": true,
+  "dataset_id": "pg-ddl-lock-001",
+  "database_type": "postgresql",
+  "instance_id": "db-pg-004",
+  "database": "billing",
+  "scenario": {
+    "label": "PostgreSQL DDL 被空闲事务阻塞并引发查询排队",
+    "search_query": "PostgreSQL DDL 表锁 AccessExclusiveLock 长事务 pg_locks",
+    "steps": [
+      {
+        "tool": "pg_locks",
+        "label": "锁等待链与 DDL 队列",
+        "args": {
+          "instance_id": "$instance_id",
+          "start_time": "$start_time",
+          "end_time": "$end_time"
+        },
+        "reason": "先查 pg_locks 和阻塞 PID，确认 DDL 在等什么锁、谁持有锁，以及后面排了多少查询。"
+      },
+      {
+        "tool": "pg_activity",
+        "label": "阻塞事务的会话状态",
+        "args": {
+          "instance_id": "$instance_id",
+          "start_time": "$start_time",
+          "end_time": "$end_time",
+          "min_duration_s": 600
+        },
+        "reason": "锁视图只能看到 PID，继续查持续超过 10 分钟的会话，确认阻塞事务来自哪个应用、处于什么状态。"
+      }
+    ],
+    "diagnosis": {
+      "root_cause": "报表服务的事务在 `invoices` 上执行 SELECT 后停留在 `idle in transaction` 1260 秒，继续持有 AccessShareLock；发版执行的 `ALTER TABLE invoices` 需要 AccessExclusiveLock，只能排队等待，后续 46 个发票查询又排在 DDL 后面，形成锁队列。",
+      "confidence": "高",
+      "evidence_keys": [
+        "pg.ddl.lock_wait",
+        "pg.blocking_session"
+      ],
+      "boundary": "当前能确认锁等待关系，但未执行 DDL，也没有应用侧事务代码；真实处置必须由变更负责人在维护窗口执行。",
+      "fix": {
+        "primary": [
+          "先终止持有 AccessShareLock 的空闲事务（PID 29840），或让报表服务主动提交/回滚，释放锁。",
+          "为 DDL 会话设置 `lock_timeout`（例如 3~5 秒）和 `statement_timeout`，避免 DDL 无限等待并阻塞后续查询。",
+          "发版流程改为先检查 `pg_locks` 和长事务，再在低峰窗口执行 DDL；能使用 `CREATE INDEX CONCURRENTLY` 的场景优先使用并发版本。"
+        ],
+        "alternate": [
+          "如果 DDL 不能取消，暂停发票查询入口，避免更多查询进入锁队列。",
+          "把 DDL 拆成多个短步骤，减少单次持锁时间。"
+        ],
+        "mitigation": [
+          "临时终止阻塞会话后，DDL 会继续执行；执行前要确认没有未提交的报表事务。",
+          "对发票查询做限流，避免队列继续增长。"
+        ]
+      },
+      "excluded": [
+        "磁盘或 CPU 瓶颈：锁视图显示 DDL 处于锁等待，不是资源等待。",
+        "DDL 语法错误：DDL 已经进入等待队列，说明语法解析已通过。"
+      ],
+      "pending": [
+        "需要确认报表服务为什么开启事务后不提交，是连接池配置还是代码遗漏。",
+        "需要确认 46 个排队查询是否已经超时并被上游重试。"
+      ],
+      "verification": [
+        "终止阻塞事务后再次查询 `pg_locks`，确认 AccessExclusiveLock 被授予、等待队列清空。",
+        "在测试库复现同样 DDL 和长事务，验证 `lock_timeout` 能让 DDL 快速失败而不是堆积。",
+        "发布后观察发票查询 p99 和数据库连接数是否恢复。"
+      ],
+      "limitations": [
+        "没有采集 PostgreSQL 日志中的 lock wait 详细时间线。",
+        "DDL 的真实执行计划未在模拟环境运行。"
+      ]
+    }
+  },
+  "tool_results": {
+    "pg_locks": {
+      "payload": {
+        "mock": true,
+        "instance_id": "db-pg-004",
+        "collected_at": "2026-10-29T10:15:00+08:00",
+        "waiting": {
+          "pid": 31211,
+          "user": "deploy_bot",
+          "relation": "billing.invoices",
+          "lock_type": "AccessExclusiveLock",
+          "granted": false,
+          "wait_seconds": 754,
+          "query": "ALTER TABLE invoices ADD COLUMN tax_no varchar(64)"
+        },
+        "blocking": {
+          "pid": 29840,
+          "user": "report_svc",
+          "relation": "billing.invoices",
+          "lock_type": "AccessShareLock",
+          "granted": true,
+          "xact_age_seconds": 1260
+        },
+        "queued_queries": 46,
+        "note": "等待链来自模拟 pg_locks 快照；真实环境应同时查看 pg_blocking_pids。"
+      },
+      "details": {
+        "summary": "DDL（PID 31211）等待 AccessExclusiveLock 754 秒，被 PID 29840 的 AccessShareLock 阻塞；后面有 46 个查询排队",
+        "topic": {
+          "facts": [
+            {
+              "key": "pg.ddl.lock_wait",
+              "statement": "DDL `ALTER TABLE invoices ADD COLUMN tax_no varchar(64)`（PID 31211）等待 AccessExclusiveLock 已 754 秒，被 PID 29840 持有的 AccessShareLock 阻塞，后面有 46 个查询排队",
+              "data": {
+                "waiting_pid": 31211,
+                "waiting_lock": "AccessExclusiveLock",
+                "wait_seconds": 754,
+                "blocking_pid": 29840,
+                "blocking_lock": "AccessShareLock",
+                "queued_queries": 46,
+                "ddl": "ALTER TABLE invoices ADD COLUMN tax_no varchar(64)"
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "ddl_blocked_by_access_share",
+              "statement": "DDL 需要的 AccessExclusiveLock 与报表事务持有的 AccessShareLock 冲突",
+              "status": "supported"
+            },
+            {
+              "key": "query_queue_behind_ddl",
+              "statement": "后续查询排在 DDL 后面，导致影响从发版扩大到在线查询",
+              "status": "supported"
+            }
+          ],
+          "open_questions": [
+            "需要确认阻塞 PID 对应的应用事务为什么没有结束"
+          ],
+          "next_steps": [
+            "查看阻塞会话状态和来源",
+            "评估终止事务或取消 DDL",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    },
+    "pg_activity": {
+      "payload": {
+        "mock": true,
+        "instance_id": "db-pg-004",
+        "collected_at": "2026-10-29T10:15:08+08:00",
+        "sessions": [
+          {
+            "pid": 29840,
+            "user": "report_svc",
+            "application_name": "invoice-report",
+            "client_addr": "10.30.8.51",
+            "state": "idle in transaction",
+            "duration_seconds": 1260,
+            "xact_age_seconds": 1260,
+            "wait_event": "ClientRead",
+            "last_query": "SELECT id, invoice_no, amount FROM invoices WHERE tenant_id = $1"
+          },
+          {
+            "pid": 31211,
+            "user": "deploy_bot",
+            "application_name": "schema-migrator",
+            "client_addr": "10.30.2.10",
+            "state": "active",
+            "duration_seconds": 754,
+            "wait_event": "Lock",
+            "last_query": "ALTER TABLE invoices ADD COLUMN tax_no varchar(64)"
+          }
+        ],
+        "long_transaction_count": 2,
+        "note": "只展示与锁等待相关的会话；数据为模拟快照。"
+      },
+      "details": {
+        "summary": "阻塞者 PID 29840（report_svc/invoice-report）处于 idle in transaction 1260 秒，最后执行的是发票 SELECT；DDL 会话 PID 31211 在等锁",
+        "topic": {
+          "facts": [
+            {
+              "key": "pg.blocking_session",
+              "statement": "阻塞者 PID 29840（report_svc/invoice-report）在 `idle in transaction` 状态停留 1260 秒，最后执行的是 `SELECT ... FROM invoices`，因此持续持有 AccessShareLock",
+              "data": {
+                "pid": 29840,
+                "user": "report_svc",
+                "application_name": "invoice-report",
+                "state": "idle in transaction",
+                "duration_seconds": 1260,
+                "xact_age_seconds": 1260,
+                "last_query": "SELECT id, invoice_no, amount FROM invoices WHERE tenant_id = $1"
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "idle_transaction_holds_lock",
+              "statement": "报表事务没有结束，持续持有发票表的 AccessShareLock",
+              "status": "supported"
+            }
+          ],
+          "open_questions": [
+            "需要确认应用是连接池复用还是代码漏提交",
+            "需要确认发版 DDL 是否可以改用并发方式"
+          ],
+          "next_steps": [
+            "在变更窗口处理阻塞事务",
+            "为 DDL 增加 lock_timeout",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    }
+  }
+}

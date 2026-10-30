@@ -1,0 +1,8 @@
+{
+  "name": "slow-sql",
+  "label": "慢 SQL 调查",
+  "version": "1",
+  "description": "面向 MySQL 慢 SQL 工单的只读调查流程：确认慢日志、执行计划、实例监控和锁等待，输出带证据引用的报告。",
+  "initial_tools": ["slow_log_query"],
+  "content_file": "SKILL.md"
+}

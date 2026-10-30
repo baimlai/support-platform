@@ -1,0 +1,212 @@
+{
+  "mock": true,
+  "dataset_id": "pg-autovacuum-bloat-001",
+  "database_type": "postgresql",
+  "instance_id": "db-pg-003",
+  "database": "appdb",
+  "scenario": {
+    "label": "PostgreSQL 长事务阻塞 autovacuum 导致表膨胀",
+    "search_query": "PostgreSQL 活动会话 长事务 表膨胀 死元组 autovacuum",
+    "steps": [
+      {
+        "tool": "pg_activity",
+        "label": "活动会话与长事务",
+        "args": {
+          "instance_id": "$instance_id",
+          "start_time": "$start_time",
+          "end_time": "$end_time",
+          "min_duration_s": 60
+        },
+        "reason": "先查持续超过 60 秒的 PostgreSQL 会话，确认是否存在长时间 idle in transaction 的事务和旧 xmin。"
+      },
+      {
+        "tool": "pg_table_stats",
+        "label": "订单表死元组与膨胀",
+        "args": {
+          "schema": "public",
+          "table": "orders"
+        },
+        "reason": "长事务可能阻塞清理，继续查 public.orders 的死元组比例、最近 autovacuum 时间和表膨胀情况。"
+      }
+    ],
+    "diagnosis": {
+      "root_cause": "报表服务的事务执行完查询后没有提交或回滚，连接在 `idle in transaction` 状态停留 31 分钟并持有旧 xmin；autovacuum 无法清理这段时间产生的死元组，导致 `public.orders` 膨胀到 38.4%，查询扫描的数据量持续增加。",
+      "confidence": "高",
+      "evidence_keys": [
+        "pg.long_transaction",
+        "pg.table.bloat"
+      ],
+      "boundary": "当前只证明长事务与表膨胀同时存在，尚未抓到 autovacuum 等待该 xmin 的实时锁视图；修复前需确认应用事务边界。",
+      "fix": {
+        "primary": [
+          "修复报表服务连接使用方式：查询结束后立即提交/回滚事务，不要复用未结束的事务连接。",
+          "为应用连接设置 `idle_in_transaction_session_timeout`（例如 60 秒），自动清理长期空闲事务。",
+          "确认阻塞解除后，对 `public.orders` 执行常规 `VACUUM (ANALYZE)`，让 autovacuum 回收死元组；不要直接在生产执行 `VACUUM FULL`。"
+        ],
+        "alternate": [
+          "如果表已经严重膨胀且空间无法回收，评估 `pg_repack` 或维护窗口内重建表。",
+          "调整 autovacuum 阈值和 scale factor，让大表更早触发清理，但这是辅助措施，不能替代修复长事务。"
+        ],
+        "mitigation": [
+          "临时终止长时间 idle in transaction 的报表会话，观察 autovacuum 是否恢复。",
+          "对订单列表查询增加分页和覆盖索引，降低膨胀表上的扫描成本。"
+        ]
+      },
+      "excluded": [
+        "磁盘写满：表统计显示数据文件仍在增长，但实例没有报磁盘满或只读错误。",
+        "autovacuum 进程未开启：参数显示 autovacuum 开启，最近一次成功清理发生在前一天。"
+      ],
+      "pending": [
+        "需要确认报表服务使用的是连接池还是长连接，以及哪个代码路径漏掉了 commit/rollback。",
+        "需要观察 `pg_stat_activity.backend_xmin` 与 autovacuum 的等待关系，当前是时间相关性证据。"
+      ],
+      "verification": [
+        "修复事务提交后重新采集 `pg_stat_activity`，确认旧 xmin 消失。",
+        "等待一个 autovacuum 周期，观察 `n_dead_tup` 和表大小是否下降。",
+        "对比订单列表查询在清理前后的执行计划和 p99 延迟。"
+      ],
+      "limitations": [
+        "模拟数据没有包含 autovacuum 日志，无法给出被阻塞的具体时间线。",
+        "表膨胀比例是估算值，真实环境应结合 `pgstattuple` 或监控历史复核。"
+      ]
+    }
+  },
+  "tool_results": {
+    "pg_activity": {
+      "payload": {
+        "mock": true,
+        "instance_id": "db-pg-003",
+        "collected_at": "2026-10-29T10:12:30+08:00",
+        "sessions": [
+          {
+            "pid": 22184,
+            "user": "report_svc",
+            "application_name": "report-worker",
+            "client_addr": "10.30.8.44",
+            "state": "idle in transaction",
+            "duration_seconds": 1860,
+            "xact_age_seconds": 1830,
+            "backend_xmin": "73120488",
+            "wait_event": "ClientRead",
+            "last_query": "SELECT id, amount, status FROM orders WHERE created_at >= now() - interval '7 days'"
+          },
+          {
+            "pid": 22201,
+            "user": "order_api",
+            "application_name": "order-api",
+            "client_addr": "10.30.9.12",
+            "state": "active",
+            "duration_seconds": 3.2,
+            "xact_age_seconds": 3.2,
+            "wait_event": "IO",
+            "last_query": "SELECT id, amount FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 20"
+          }
+        ],
+        "long_transaction_count": 1,
+        "note": "只展示持续超过 60 秒的会话；数据为模拟快照。"
+      },
+      "details": {
+        "summary": "PID 22184（report_svc）处于 idle in transaction 1860 秒，xmin age 1830 秒，持有旧快照",
+        "topic": {
+          "facts": [
+            {
+              "key": "pg.long_transaction",
+              "statement": "PID 22184（report_svc/report-worker）在 `idle in transaction` 状态停留 1860 秒，事务年龄 1830 秒，持有旧 xmin 73120488",
+              "data": {
+                "pid": 22184,
+                "user": "report_svc",
+                "application_name": "report-worker",
+                "state": "idle in transaction",
+                "duration_seconds": 1860,
+                "xact_age_seconds": 1830,
+                "backend_xmin": "73120488",
+                "last_query": "SELECT id, amount, status FROM orders WHERE created_at >= now() - interval '7 days'"
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "idle_transaction_blocking_vacuum",
+              "statement": "长事务持有旧 xmin，可能阻止 autovacuum 回收死元组",
+              "status": "supported"
+            }
+          ],
+          "open_questions": [
+            "需要确认报表服务为什么没有结束事务"
+          ],
+          "next_steps": [
+            "查询订单表死元组和膨胀统计",
+            "确认 autovacuum 最近执行情况",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    },
+    "pg_table_stats": {
+      "payload": {
+        "mock": true,
+        "instance_id": "db-pg-003",
+        "schema": "public",
+        "table": "orders",
+        "collected_at": "2026-10-29T10:12:42+08:00",
+        "live_tuples": 12100000,
+        "dead_tuples": 8420000,
+        "dead_ratio": 0.4103,
+        "table_size_gb": 96.4,
+        "bloat_ratio": 0.384,
+        "last_vacuum": "2026-10-22T03:10:00+08:00",
+        "last_autovacuum": "2026-10-28T02:10:00+08:00",
+        "autovacuum_count": 1,
+        "index_bloat_ratio": 0.22,
+        "note": "死元组和膨胀比例为模拟估算；真实环境需结合实际统计。"
+      },
+      "details": {
+        "summary": "public.orders 死元组 842 万、占比 41.0%，表大小 96.4GB，膨胀率约 38.4%；最近 autovacuum 是 10 月 28 日 02:10",
+        "topic": {
+          "facts": [
+            {
+              "key": "pg.table.bloat",
+              "statement": "public.orders 有 842 万死元组（占 41.0%），表约 96.4GB、膨胀率 38.4%；最近一次 autovacuum 在 2026-10-28 02:10，之后没有成功清理",
+              "data": {
+                "schema": "public",
+                "table": "orders",
+                "live_tuples": 12100000,
+                "dead_tuples": 8420000,
+                "dead_ratio": 0.4103,
+                "table_size_gb": 96.4,
+                "bloat_ratio": 0.384,
+                "last_vacuum": "2026-10-22T03:10:00+08:00",
+                "last_autovacuum": "2026-10-28T02:10:00+08:00",
+                "autovacuum_count": 1
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "table_bloat",
+              "statement": "订单表已经明显膨胀，死元组比例高，查询需要扫描更多数据页",
+              "status": "supported"
+            },
+            {
+              "key": "autovacuum_blocked",
+              "statement": "长事务持有的旧 xmin 使 autovacuum 无法回收这些死元组",
+              "status": "supported"
+            }
+          ],
+          "open_questions": [
+            "需要确认 autovacuum 是否在等待该长事务"
+          ],
+          "next_steps": [
+            "修复报表服务事务边界",
+            "观察 autovacuum 恢复清理",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    }
+  }
+}

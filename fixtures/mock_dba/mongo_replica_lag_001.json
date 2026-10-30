@@ -1,0 +1,249 @@
+{
+  "mock": true,
+  "dataset_id": "mongo-replica-lag-001",
+  "database_type": "mongodb",
+  "instance_id": "mongo-rs-008",
+  "database": "analytics",
+  "scenario": {
+    "label": "MongoDB 从节点磁盘 IO 饱和导致复制延迟",
+    "search_query": "MongoDB 副本集 复制延迟 replSetGetStatus 从节点 磁盘 IO",
+    "steps": [
+      {
+        "tool": "mongo_rs_status",
+        "label": "副本集延迟与节点角色",
+        "args": {
+          "instance_id": "$instance_id"
+        },
+        "reason": "先查 replSetGetStatus，确认哪个节点是主、哪个从节点落后、延迟多少秒，以及复制是否报错。"
+      },
+      {
+        "tool": "mongo_server_status",
+        "label": "从节点资源与写入队列",
+        "args": {
+          "instance_id": "$instance_id"
+        },
+        "reason": "复制延迟只是结果，继续查主从节点的 CPU、磁盘利用率、IO await、WiredTiger cache 和写入队列，找出从节点跟不上原因。"
+      }
+    ],
+    "diagnosis": {
+      "root_cause": "分析集群在 10:02 启动历史数据回填，主节点产生大量 oplog；从节点 `10.30.12.22` 使用低 IOPS 云盘，回放时磁盘利用率达到 99%、await 48ms、写入队列 37，无法及时应用 oplog，复制延迟累积到 842 秒。主节点和复制网络都正常，瓶颈在从节点磁盘。",
+      "confidence": "高",
+      "evidence_keys": [
+        "mongo.rs.lag",
+        "mongo.secondary.disk"
+      ],
+      "boundary": "当前能确认延迟发生在单个从节点且磁盘饱和，但没有查看云盘 IOPS 配额和回填任务代码；扩容或限速前需与业务确认回填窗口。",
+      "fix": {
+        "primary": [
+          "暂停或限速历史数据回填任务（例如按 5000 条一批、批间休眠），降低主节点 oplog 产生速率，让从节点追平。",
+          "为该从节点更换更高 IOPS 的云盘，或把从节点规格调整到与主节点一致；先确认云盘 IOPS 配额是否被打满。",
+          "报表服务对数据新鲜度敏感的查询改用 `readPreference=primary` 或 `primaryPreferred`，避免读到延迟 14 分钟的从节点。"
+        ],
+        "alternate": [
+          "增加一个与主节点同规格的从节点，等它同步完成后再把旧从节点下线重建。",
+          "把分析写入拆到独立集群，避免回填流量影响在线副本集。"
+        ],
+        "mitigation": [
+          "临时降低回填并发度，观察 lag 是否开始下降。",
+          "对报表侧增加“数据延迟”提示，避免业务把旧数据当成实时数据。"
+        ]
+      },
+      "excluded": [
+        "复制网络故障：主从之间网络延迟约 2ms、无重传，心跳正常。",
+        "主节点资源瓶颈：主节点 CPU 52%、磁盘利用率 35%，写入仍能正常完成。",
+        "从节点宕机：节点健康状态为 1，仍在持续应用 oplog，只是速度跟不上。"
+      ],
+      "pending": [
+        "需要确认回填任务的来源、总量和预计结束时间。",
+        "需要确认该从节点云盘的基线 IOPS 和突发额度，判断是长期规格不足还是短时突发。"
+      ],
+      "verification": [
+        "限速回填后持续观察 `replSetGetStatus` 的 optimeDate 差值，确认 lag 从 842 秒逐步下降。",
+        "观察从节点磁盘 util 和 await 是否回落到 70%/20ms 以下。",
+        "回填结束后确认从节点能稳定追平主节点，报表查询不再读到旧数据。"
+      ],
+      "limitations": [
+        "没有采集云盘厂商侧的 IOPS 限流指标，只能从 util 和 await 推断饱和。",
+        "延迟数据是模拟快照，真实环境应结合 `rs.printSecondaryReplicationInfo()` 历史曲线。"
+      ]
+    }
+  },
+  "tool_results": {
+    "mongo_rs_status": {
+      "payload": {
+        "mock": true,
+        "instance_id": "mongo-rs-008",
+        "collected_at": "2026-10-29T10:22:00+08:00",
+        "set": "rs-analytics",
+        "members": [
+          {
+            "name": "10.30.12.21:27017",
+            "state": "PRIMARY",
+            "health": 1,
+            "optime_date": "2026-10-29T10:22:00+08:00",
+            "lag_seconds": 0
+          },
+          {
+            "name": "10.30.12.22:27017",
+            "state": "SECONDARY",
+            "health": 1,
+            "optime_date": "2026-10-29T10:08:00+08:00",
+            "lag_seconds": 842
+          },
+          {
+            "name": "10.30.12.23:27017",
+            "state": "SECONDARY",
+            "health": 1,
+            "optime_date": "2026-10-29T10:21:58+08:00",
+            "lag_seconds": 2
+          }
+        ],
+        "replication": {
+          "oplog_window_hours": 18,
+          "last_sync_error": null,
+          "heartbeat_latency_ms": 2
+        },
+        "note": "副本集状态为模拟快照；延迟按 optimeDate 与主节点差值计算。"
+      },
+      "details": {
+        "summary": "从节点 10.30.12.22 复制延迟 842 秒，另一个从节点仅 2 秒；主节点写入正常，无同步错误",
+        "topic": {
+          "facts": [
+            {
+              "key": "mongo.rs.lag",
+              "statement": "副本集 rs-analytics 中，从节点 `10.30.12.22:27017` 的 optime 比主节点落后 842 秒，另一个从节点只落后 2 秒；没有 lastSyncError，心跳延迟 2ms",
+              "data": {
+                "set": "rs-analytics",
+                "lagging_member": "10.30.12.22:27017",
+                "lag_seconds": 842,
+                "healthy_member_lag_seconds": 2,
+                "last_sync_error": null,
+                "heartbeat_latency_ms": 2,
+                "oplog_window_hours": 18
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "single_secondary_lag",
+              "statement": "延迟集中在单个从节点，另一个从节点正常，说明不是主节点或网络全局问题",
+              "status": "supported"
+            },
+            {
+              "key": "network_issue",
+              "statement": "复制网络故障导致延迟",
+              "status": "unverified"
+            }
+          ],
+          "open_questions": [
+            "需要确认落后从节点的资源使用情况"
+          ],
+          "next_steps": [
+            "查看从节点磁盘和 CPU",
+            "评估回填任务影响",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    },
+    "mongo_server_status": {
+      "payload": {
+        "mock": true,
+        "instance_id": "mongo-rs-008",
+        "collected_at": "2026-10-29T10:22:08+08:00",
+        "nodes": [
+          {
+            "name": "10.30.12.21:27017",
+            "role": "primary",
+            "cpu_percent": 52,
+            "disk_util_percent": 35,
+            "disk_await_ms": 4.1,
+            "write_queue": 0,
+            "wiredtiger_cache_used_ratio": 0.61,
+            "oplog_apply_rate_mb_per_min": 0
+          },
+          {
+            "name": "10.30.12.22:27017",
+            "role": "secondary",
+            "cpu_percent": 38,
+            "disk_util_percent": 99,
+            "disk_await_ms": 48,
+            "write_queue": 37,
+            "wiredtiger_cache_used_ratio": 0.92,
+            "oplog_apply_rate_mb_per_min": 92
+          },
+          {
+            "name": "10.30.12.23:27017",
+            "role": "secondary",
+            "cpu_percent": 41,
+            "disk_util_percent": 46,
+            "disk_await_ms": 5.3,
+            "write_queue": 1,
+            "wiredtiger_cache_used_ratio": 0.66,
+            "oplog_apply_rate_mb_per_min": 94
+          }
+        ],
+        "workload": {
+          "backfill_started_at": "2026-10-29T10:02:00+08:00",
+          "backfill_source": "analytics-import",
+          "primary_insert_rate_per_sec": 42000,
+          "oplog_generation_mb_per_min": 96
+        },
+        "note": "资源指标为模拟快照；回填任务名为模拟数据。"
+      },
+      "details": {
+        "summary": "落后从节点磁盘利用率 99%、await 48ms、写队列 37；主节点磁盘仅 35%，另一从节点 46%；10:02 开始的回填任务让 oplog 达到 96MB/min",
+        "topic": {
+          "facts": [
+            {
+              "key": "mongo.secondary.disk",
+              "statement": "从节点 `10.30.12.22:27017` 磁盘利用率 99%、await 48ms、写队列 37、WiredTiger cache 92%；主节点磁盘 35%，另一从节点 46%；10:02 启动的 analytics-import 回填使 oplog 产生速率达到 96MB/min",
+              "data": {
+                "lagging_node": "10.30.12.22:27017",
+                "disk_util_percent": 99,
+                "disk_await_ms": 48,
+                "write_queue": 37,
+                "wiredtiger_cache_used_ratio": 0.92,
+                "primary_disk_util_percent": 35,
+                "healthy_secondary_disk_util_percent": 46,
+                "backfill_started_at": "2026-10-29T10:02:00+08:00",
+                "backfill_source": "analytics-import",
+                "oplog_generation_mb_per_min": 96
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "secondary_disk_saturated",
+              "statement": "单从节点磁盘 IO 饱和，无法及时回放 oplog",
+              "status": "supported"
+            },
+            {
+              "key": "backfill_amplification",
+              "statement": "历史数据回填放大了 oplog 写入量，是延迟的触发条件",
+              "status": "supported"
+            },
+            {
+              "key": "primary_bottleneck",
+              "statement": "主节点资源不足导致写入慢",
+              "status": "excluded"
+            }
+          ],
+          "open_questions": [
+            "需要确认从节点云盘 IOPS 配额",
+            "需要确认回填任务预计持续多久"
+          ],
+          "next_steps": [
+            "限速回填或暂停",
+            "提升从节点磁盘 IOPS",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    }
+  }
+}

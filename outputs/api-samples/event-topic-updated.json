@@ -1,0 +1,74 @@
+{
+  "seq": 15,
+  "ts": 1793331496068,
+  "type": "topic_updated",
+  "turn": 1,
+  "data": {
+    "topic": {
+      "question": "订单查询从今天 10 点开始明显变慢",
+      "scope": {
+        "ticket_id": "TCK-20261029-001",
+        "instance_id": "db-mysql-001",
+        "database": "shop_order",
+        "time_range": {
+          "start": "2026-10-29T10:00:00+08:00",
+          "end": "2026-10-29T11:00:00+08:00"
+        },
+        "mock": true
+      },
+      "facts": [
+        {
+          "key": "slow_log.top",
+          "statement": "最慢 SQL 指纹 a1b2c3d4e5f6：平均 2380 ms，最大 8120 ms，出现 1240 次，平均扫描 185000 行、返回 20 行",
+          "evidence_id": "ev-000001",
+          "source_tool": "slow_log_query",
+          "observed": true,
+          "data": {
+            "sql_fingerprint": "a1b2c3d4e5f6",
+            "avg_latency_ms": 2380,
+            "max_latency_ms": 8120,
+            "count": 1240,
+            "avg_rows_examined": 185000,
+            "avg_rows_sent": 20,
+            "truncated": true,
+            "raw_size_chars": 16658,
+            "max_inline_chars": 4000
+          }
+        },
+        {
+          "key": "slow_log.coverage",
+          "statement": "慢日志采样覆盖率约 0.92，不代表全量请求",
+          "evidence_id": "ev-000001",
+          "source_tool": "slow_log_query",
+          "observed": true,
+          "data": {
+            "coverage_ratio": 0.92
+          }
+        }
+      ],
+      "candidates": [
+        {
+          "key": "access_path",
+          "statement": "最慢 SQL 可能因访问路径或索引导致大量扫描（等待执行计划确认，仍是推断）",
+          "status": "candidate",
+          "evidence": [
+            "ev-000001"
+          ]
+        }
+      ],
+      "open_questions": [],
+      "next_steps": [
+        "按最慢指纹查询执行计划",
+        "补充实例监控（CPU/IO）",
+        "补充锁等待样本"
+      ],
+      "attempted_tools": [
+        "slow_log_query"
+      ],
+      "evidence_reads": [],
+      "searches": [],
+      "updated_at": "2026-10-30T03:38:16.067830+00:00"
+    },
+    "turn": 1
+  }
+}

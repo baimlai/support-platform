@@ -1,0 +1,28 @@
+{
+  "mock": true,
+  "ticket_id": "TCK-MONGO-LAG-008",
+  "title": "报表读取从库数据延迟十几分钟",
+  "description": "报表服务从 MongoDB 只读节点读取数据时发现数据陈旧，replSetGetStatus 显示一个从节点复制延迟超过 10 分钟。",
+  "symptom": "MongoDB 副本集一个从节点复制延迟超过 800 秒，报表读取到旧数据。",
+  "tenant_id": "tenant-demo",
+  "instance_id": "mongo-rs-008",
+  "database": "analytics",
+  "database_type": "mongodb",
+  "scenario_id": "mongo-replica-lag-001",
+  "scenario_label": "MongoDB 从节点磁盘 IO 饱和导致复制延迟",
+  "scenario_mode": true,
+  "skill": "dba-triage",
+  "dataset": "fixtures/mock_dba/mongo_replica_lag_001.json",
+  "scenario_order": 80,
+  "time_range": {
+    "start": "2026-10-29T10:00:00+08:00",
+    "end": "2026-10-29T11:00:00+08:00"
+  },
+  "investigation_plan": [
+    "查询 MongoDB 副本集状态和复制延迟",
+    "查看从节点资源与写入队列",
+    "汇总证据并输出报告"
+  ],
+  "source": "fixture",
+  "mock_note": "工单和工具结果均为模拟数据，仅用于演示 MongoDB 复制延迟排查流程。"
+}

@@ -1,0 +1,28 @@
+{
+  "mock": true,
+  "ticket_id": "TCK-PG-DDL-004",
+  "title": "发版变更卡住，发票查询全部排队",
+  "description": "发布窗口执行 ALTER TABLE invoices ADD COLUMN 后，DDL 一直等待；随后查询发票的接口也开始堆积。",
+  "symptom": "DDL 长时间等待 AccessExclusiveLock，发票查询接口排队，疑似被空闲事务持有 AccessShareLock。",
+  "tenant_id": "tenant-demo",
+  "instance_id": "db-pg-004",
+  "database": "billing",
+  "database_type": "postgresql",
+  "scenario_id": "pg-ddl-lock-001",
+  "scenario_label": "PostgreSQL DDL 被空闲事务阻塞并引发查询排队",
+  "scenario_mode": true,
+  "skill": "dba-triage",
+  "dataset": "fixtures/mock_dba/pg_ddl_lock_001.json",
+  "scenario_order": 40,
+  "time_range": {
+    "start": "2026-10-29T10:00:00+08:00",
+    "end": "2026-10-29T11:00:00+08:00"
+  },
+  "investigation_plan": [
+    "查询 PostgreSQL 锁等待链",
+    "确认阻塞事务持有哪种锁",
+    "汇总证据并输出报告"
+  ],
+  "source": "fixture",
+  "mock_note": "工单和工具结果均为模拟数据，仅用于演示 DDL 锁等待排查流程。"
+}

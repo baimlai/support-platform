@@ -1,0 +1,360 @@
+{
+  "events": [
+    {
+      "seq": 242,
+      "ts": 1793331496172,
+      "type": "turn_end",
+      "turn": 6,
+      "data": {
+        "turn": 6,
+        "message": {
+          "content": [
+            {
+              "text": "# 慢 SQL 工单调查报告（模拟 · 第 2 步）\n\n## 现象\n- 工单 `TCK-20261029-001` 报告：订单列表查询变慢，部分请求超时\n- 实例：`db-mysql-001`；业务库：`shop_order`\n- 慢日志观测：最慢 SQL 指纹 a1b2c3d4e5f6：平均 2380 ms，最大 8120 ms，出现 1240 次，平均扫描 185000 行、返回 20 行（证据 `ev-000001`）\n- 执行计划观测：执行计划访问类型 ALL，未命中索引，估算扫描 185000 行，Extra：Using where, Using filesort（证据 `ev-000002`）\n\n## 调查过程\n| # | 工具 | 结果 | 证据 |\n| --- | --- | --- | --- |\n| 1 | `slow_log_query`（慢日志查询） | 成功：最慢指纹 `a1b2c3d4e5f6`，平均 2380 ms | `ev-000001` |\n| 2 | `evidence_read`（证据读取） | 读取证据 `ev-000001`：offset=4000, limit=800, 总 16658 字符，后面还有内容 | — |\n| 3 | `search_tools`（工具搜索） | 加载了 3 个工具：execution_plan, lock_wait_query, instance_metrics | — |\n| 4 | `execution_plan`（执行计划） | 成功：访问类型 `ALL`，索引 `未命中索引` | `ev-000002` |\n| 5 | `instance_metrics`（实例监控） | 失败，未验证：实例监控接口超时（模拟）：等待 5 秒仍未返回，CPU、IO 等监控数据未获取到，不能据此判断实例负载是否正常。 | `ev-000003` |\n| 6 | `lock_wait_query`（锁等待） | no_data：样本数 0 | `ev-000004` |\n\n> Skill：`slow-sql`（慢 SQL 调查）。初始只开放 `slow_log_query`，其余工具通过 `search_tools` 按需加载；大结果保存到 `evidence/`，本次还调用了 `evidence_read` 分段读取。\n> 本轮上下文预算：模型输入约 11799/12000 字符（字符估算，不是 token）；保留最近 7 条消息，丢弃 4 条旧消息，另有 0 条工具结果被二次裁剪。\n\n## 证据\n- **slow_log.top**：最慢 SQL 指纹 a1b2c3d4e5f6：平均 2380 ms，最大 8120 ms，出现 1240 次，平均扫描 185000 行、返回 20 行（证据 `ev-000001`）\n- **slow_log.coverage**：慢日志采样覆盖率约 0.92，不代表全量请求（证据 `ev-000001`）\n- **execution_plan.access**：执行计划访问类型 ALL，未命中索引，估算扫描 185000 行，Extra：Using where, Using filesort（证据 `ev-000002`）\n- **lock_wait.samples**：锁等待查询返回 no_data：采样窗口内没有样本（证据 `ev-000004`）\n\n### 未决问题\n- 工具 instance_metrics 执行失败，相关结论未验证：实例监控接口超时（模拟）：等待 5 秒仍未返回，CPU、IO 等监控数据未获取到，不能据此判断实例负载是否正常。\n- 无锁等待样本不等于没有锁等待，需要更长窗口或其它采样源复核\n\n## 候选原因\n- **[有观测支持] access_path**：最慢 SQL 执行计划显示全表扫描，可能无法有效利用现有索引；这是有观测支持的推断，仍需真实 EXPLAIN ANALYZE 复核（证据：`ev-000001`、`ev-000002`）\n- **[未验证] instance_resource**：实例 CPU/IO 是否成为瓶颈：监控接口失败，尚未验证（证据：`ev-000003`）\n- **[未验证] lock_wait**：锁等待影响：采样窗口内无样本，当前无法确认或排除（证据：`ev-000004`）\n\n## 建议\n1. 在只读副本或测试环境对最慢 SQL 执行 `EXPLAIN ANALYZE`，确认真实扫描行数、回表次数和排序开销。\n2. 核对 SQL 过滤条件与现有索引的定义、选择性，评估是否需要调整联合索引；索引变更要先评估写入影响并走变更流程。\n3. 对比 `LIMIT` 前后的执行计划，确认 `Using filesort` 是否可以消除。\n4. 监控恢复后补充 CPU、IO 数据，确认资源是否成为瓶颈。\n5. 用更长采样窗口或其它采样源复核锁等待。\n6. 所有建议仅用于只读排查；任何索引、参数或 SQL 变更都必须走变更流程。\n\n## 验证方法\n1. 用同一时间范围重新采集慢日志，对比平均耗时和扫描行数是否稳定复现。\n2. 在只读环境对最慢 SQL 执行 `EXPLAIN ANALYZE`，把真实执行计划与本次模拟计划对照。\n3. 补采实例监控和更长窗口的锁等待样本，复核本次未验证项。\n4. 如果调整索引，先在测试库对比调整前后的执行计划和慢日志统计。\n\n## 当前限制\n- 本报告基于**模拟数据**和模拟工具，不代表真实客户、实例或业务事实。\n- 慢日志原始结果约 16658 字符，超过单条内联上限 4000；报告依据证据 `ev-000001` 的摘要和分页读取，没有逐行核对全部行。\n- 实例监控未验证：CPU/IO 是否成为瓶颈无法判断。\n- 锁等待查询为 `no_data`：采样窗口内没有样本，不等于没有锁等待。\n- 本轮只做只读调查和建议，没有执行任何生产变更。",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "stop",
+          "error_message": null,
+          "timestamp": 1793331496172,
+          "provider": "mock",
+          "model": "mock-dba",
+          "role": "assistant"
+        },
+        "tool_results": []
+      }
+    },
+    {
+      "seq": 243,
+      "ts": 1793331496173,
+      "type": "agent_end",
+      "turn": null,
+      "data": {
+        "messages": [
+          {
+            "content": "下面是待处理的工单（mock=true，数据仅用于流程验证）：\n\n<BEGIN_TICKET_JSON>\n{\n  \"mock\": true,\n  \"ticket_id\": \"TCK-20261029-001\",\n  \"tenant_id\": \"tenant-demo\",\n  \"title\": \"订单查询从今天 10 点开始明显变慢\",\n  \"description\": \"客户反馈订单列表查询从今天 10:00 左右开始明显变慢，部分请求超时。实例为 db-mysql-001，业务库为 shop_order，主要接口是订单列表查询。\",\n  \"instance_id\": \"db-mysql-001\",\n  \"database\": \"shop_order\",\n  \"time_range\": {\n    \"start\": \"2026-10-29T10:00:00+08:00\",\n    \"end\": \"2026-10-29T11:00:00+08:00\"\n  },\n  \"symptom\": \"订单列表查询变慢，部分请求超时\",\n  \"mock_note\": \"此工单和后续工具数据均为模拟，仅用于验证 Agent 流程，不代表真实客户、实例或业务事实。\"\n}\n<END_TICKET_JSON>\n\n请按当前 Skill 的调查方法开始调查：先确认实例、SQL 指纹和时间范围，再调用工具取证。\n需要其它工具时先用 search_tools 搜索。如果某个工具失败或无数据，\n请在结论中明确标注为“未验证”，不要解释为“没有异常”。\n最后给出：现象、调查过程、证据、候选原因、建议、验证方法和当前限制。\n",
+            "timestamp": 1793331496063,
+            "role": "user"
+          },
+          {
+            "content": [
+              {
+                "text": "我先按工单里的实例和时间范围查询慢日志。为了看到完整分布，本次取 50 条；原始结果可能较大，平台会保存为证据，模型只看到有界预览。",
+                "type": "text"
+              },
+              {
+                "id": "call-1",
+                "name": "slow_log_query",
+                "arguments": {
+                  "instance_id": "db-mysql-001",
+                  "start_time": "2026-10-29T10:00:00+08:00",
+                  "end_time": "2026-10-29T11:00:00+08:00",
+                  "limit": 50
+                },
+                "type": "toolCall"
+              }
+            ],
+            "stop_reason": "toolUse",
+            "error_message": null,
+            "timestamp": 1793331496066,
+            "provider": "mock",
+            "model": "mock-dba",
+            "role": "assistant"
+          },
+          {
+            "tool_call_id": "call-1",
+            "tool_name": "slow_log_query",
+            "content": [
+              {
+                "text": "{\n  \"truncated\": true,\n  \"evidence_id\": \"ev-000001\",\n  \"tool_name\": \"slow_log_query\",\n  \"size_chars\": 16658,\n  \"max_inline_chars\": 4000,\n  \"preview\": \"{\\n  \\\"mock\\\": true,\\n  \\\"source\\\": \\\"slow_log_service (mock)\\\",\\n  \\\"instance_id\\\": \\\"db-mysql-001\\\",\\n  \\\"requested_range\\\": {\\n    \\\"start\\\": \\\"2026-10-29T10:00:00+08:00\\\",\\n    \\\"end\\\": \\\"2026-10-29T11:00:00+08:00\\\"\\n  },\\n  \\\"coverage\\\": {\\n    \\\"start\\\": \\\"2026-10-29T10:00:00+08:00\\\",\\n    \\\"end\\\": \\\"2026-10-29T11:00:00+08:00\\\",\\n    \\\"coverage_ratio\\\": 0.92,\\n    \\\"note\\\": \\\"慢日志采样覆盖率约 92%，不代表全量请求\\\"\\n  },\\n  \\\"row_count\\\": 50,\\n  \\\"rows\\\": [\\n    {\\n      \\\"sql_fingerprint\\\": \\\"a1b2c3d4e5f6\\\",\\n      \\\"sample_sql\\\": \\\"SELECT id, order_no, status, created_at FROM orders WHERE user_id = ? AND status IN (?, ?) ORDER BY created_at DESC LIMIT 20\\\",\\n      \\\"count\\\": 1240,\\n      \\\"avg_latency_ms\\\": 2380,\\n      \\\"max_latency_ms\\\": 8120,\\n      \\\"avg_rows_examined\\\": 185000,\\n      \\\"avg_rows_sent\\\": 20,\\n      \\\"first_seen\\\": \\\"2026-10-29T10:03:00+08:00\\\"\\n    },\\n    {\\n      \\\"sql_fingerprint\\\": \\\"d4e5f6a1b2c3\\\",\\n      \\\"sample_sql\\\": \\\"SELECT date(created_at) AS day, sum(amount) FROM orders GROUP BY day ORDER BY day DESC LIMIT 7\\\",\\n      \\\"count\\\": 12,\\n      \\\"avg_latency_ms\\\": 960,\\n      \\\"max_latency_ms\\\": 2200,\\n      \\\"avg_rows_examined\\\": 42000,\\n      \\\"avg_rows_sent\\\": 7,\\n      \\\"first_seen\\\": \\\"2026-10-29T10:20:00+08:00\\\"\\n    },\\n    {\\n      \\\"sql_fingerprint\\\": \\\"77a26be63216\\\",\\n      \\\"sample_sql\\\": \\\"SELECT id, order_no FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT ?\\\",\\n      \\\"count\\\": 115,\\n      \\\"avg_la\",\n  \"summary\": {\n    \"mock\": true,\n    \"source\": \"slow_log_service (mock)\",\n    \"row_count\": 50,\n    \"coverage_ratio\": 0.92,\n    \"coverage_note\": \"慢日志采样覆盖率约 92%，不代表全量请求\",\n    \"top\": {\n      \"sql_fingerprint\": \"a1b2c3d4e5f6\",\n      \"sample_sql\": \"SELECT id, order_no, status, created_at FROM orders WHERE user_id = ? AND status IN (?, ?) ORDER BY created_at DESC LIMIT 20\",\n      \"count\": 1240,\n      \"avg_latency_ms\": 2380,\n      \"max_latency_ms\": 8120,\n      \"avg_rows_examined\": 185000,\n      \"avg_rows_sent\": 20\n    },\n    \"stats\": {\n      \"returned_rows\": 50,\n      \"fingerprint_count\": 50,\n      \"max_avg_latency_ms\": 2380,\n      \"min_avg_latency_ms\": 41,\n      \"total_count\": 6292\n    }\n  },\n  \"next\": \"完整原始结果已保存。需要更多内容时调用 evidence_read(evidence_id=\\\"ev-000001\\\", offset=0, limit=4000)。\"\n}",
+                "type": "text"
+              }
+            ],
+            "is_error": false,
+            "details": {
+              "mock": true,
+              "source": "slow_log_service (mock)",
+              "row_count": 50,
+              "coverage_ratio": 0.92,
+              "coverage_note": "慢日志采样覆盖率约 92%，不代表全量请求",
+              "top": {
+                "sql_fingerprint": "a1b2c3d4e5f6",
+                "sample_sql": "SELECT id, order_no, status, created_at FROM orders WHERE user_id = ? AND status IN (?, ?) ORDER BY created_at DESC LIMIT 20",
+                "count": 1240,
+                "avg_latency_ms": 2380,
+                "max_latency_ms": 8120,
+                "avg_rows_examined": 185000,
+                "avg_rows_sent": 20
+              },
+              "stats": {
+                "returned_rows": 50,
+                "fingerprint_count": 50,
+                "max_avg_latency_ms": 2380,
+                "min_avg_latency_ms": 41,
+                "total_count": 6292
+              }
+            },
+            "duration_ms": 0,
+            "meta": {
+              "evidence_id": "ev-000001",
+              "truncated": true,
+              "raw_size_chars": 16658,
+              "max_inline_chars": 4000
+            },
+            "timestamp": 1793331496068,
+            "role": "toolResult"
+          },
+          {
+            "content": [
+              {
+                "text": "慢日志原始结果约 16658 字符，已保存为证据 ev-000001。我先从第 4001 个字符开始读 800 字，确认分页读取可用，而不是只凭预览猜全文。",
+                "type": "text"
+              },
+              {
+                "id": "call-2",
+                "name": "evidence_read",
+                "arguments": {
+                  "evidence_id": "ev-000001",
+                  "offset": 4000,
+                  "limit": 800
+                },
+                "type": "toolCall"
+              }
+            ],
+            "stop_reason": "toolUse",
+            "error_message": null,
+            "timestamp": 1793331496071,
+            "provider": "mock",
+            "model": "mock-dba",
+            "role": "assistant"
+          },
+          {
+            "tool_call_id": "call-2",
+            "tool_name": "evidence_read",
+            "content": [
+              {
+                "text": "{\n  \"evidence_id\": \"ev-000001\",\n  \"tool_name\": \"slow_log_query\",\n  \"created_at\": \"2026-10-30T03:38:16.067393+00:00\",\n  \"offset\": 4000,\n  \"limit\": 800,\n  \"total_chars\": 16658,\n  \"content\": \"1279,\\n      \\\"avg_rows_examined\\\": 42881,\\n      \\\"avg_rows_sent\\\": 44,\\n      \\\"first_seen\\\": \\\"2026-10-29T10:43:01+08:00\\\"\\n    },\\n    {\\n      \\\"sql_fingerprint\\\": \\\"712852a91318\\\",\\n      \\\"sample_sql\\\": \\\"SELECT id FROM users WHERE phone = ?\\\",\\n      \\\"count\\\": 37,\\n      \\\"avg_latency_ms\\\": 686,\\n      \\\"max_latency_ms\\\": 1029,\\n      \\\"avg_rows_examined\\\": 17956,\\n      \\\"avg_rows_sent\\\": 19,\\n      \\\"first_seen\\\": \\\"2026-10-29T10:18:06+08:00\\\"\\n    },\\n    {\\n      \\\"sql_fingerprint\\\": \\\"44c2f998f591\\\",\\n      \\\"sample_sql\\\": \\\"SELECT id FROM users WHERE phone = ?\\\",\\n      \\\"count\\\": 149,\\n      \\\"avg_latency_ms\\\": 674,\\n      \\\"max_latency_ms\\\": 1011,\\n      \\\"avg_rows_examined\\\": 41884,\\n      \\\"avg_rows_sent\\\": 43,\\n      \\\"first_seen\\\": \\\"2026-10-29T10:42:54+08:00\\\"\\n    },\\n    {\\n      \\\"sql_fingerprint\\\": \\\"f37d79f29ca6\\\",\\n      \\\"sample_sql\\\": \\\"UPDATE \",\n  \"truncated\": true\n}",
+                "type": "text"
+              }
+            ],
+            "is_error": false,
+            "details": {
+              "evidence_id": "ev-000001",
+              "offset": 4000,
+              "limit": 800,
+              "total_chars": 16658,
+              "truncated": true
+            },
+            "duration_ms": 0,
+            "meta": null,
+            "timestamp": 1793331496072,
+            "role": "toolResult"
+          },
+          {
+            "content": [
+              {
+                "text": "慢日志已经看过。接下来用 search_tools 搜索执行计划、实例监控和锁等待，按需加载后续工具；搜索只加载工具，不代表获得权限。",
+                "type": "text"
+              },
+              {
+                "id": "call-3",
+                "name": "search_tools",
+                "arguments": {
+                  "query": "执行计划 实例监控 锁等待",
+                  "limit": 5
+                },
+                "type": "toolCall"
+              }
+            ],
+            "stop_reason": "toolUse",
+            "error_message": null,
+            "timestamp": 1793331496074,
+            "provider": "mock",
+            "model": "mock-dba",
+            "role": "assistant"
+          },
+          {
+            "tool_call_id": "call-3",
+            "tool_name": "search_tools",
+            "content": [
+              {
+                "text": "{\n  \"query\": \"执行计划 实例监控 锁等待\",\n  \"matches\": [\n    {\n      \"name\": \"execution_plan\",\n      \"label\": \"执行计划查询\",\n      \"description\": \"按 SQL 指纹查询模拟执行计划，返回访问类型、命中索引、估算扫描行数、过滤比例和 Extra 信息。用于判断是否全表扫描或额外排序。只读。\",\n      \"score\": 24,\n      \"already_loaded\": false\n    },\n    {\n      \"name\": \"lock_wait_query\",\n      \"label\": \"锁等待查询\",\n      \"description\": \"查询指定时间范围内的锁等待样本。返回 no_data 表示采样窗口内没有样本，不等于实例一定没有锁等待。只读。\",\n      \"score\": 18,\n      \"already_loaded\": false\n    },\n    {\n      \"name\": \"instance_metrics\",\n      \"label\": \"实例监控查询\",\n      \"description\": \"查询实例在指定时间范围内的 CPU、IO 等监控指标。注意：本轮模拟环境故意让这个接口超时，用于验证失败场景。只读。\",\n      \"score\": 14,\n      \"already_loaded\": false\n    }\n  ],\n  \"loaded\": [\n    \"execution_plan\",\n    \"lock_wait_query\",\n    \"instance_metrics\"\n  ],\n  \"visible_tools\": [\n    \"slow_log_query\",\n    \"search_tools\",\n    \"evidence_read\",\n    \"execution_plan\",\n    \"lock_wait_query\",\n    \"instance_metrics\"\n  ],\n  \"note\": \"搜索只影响后续轮次的工具声明，不授予权限；没有加载的工具无法执行。\"\n}",
+                "type": "text"
+              }
+            ],
+            "is_error": false,
+            "details": {
+              "query": "执行计划 实例监控 锁等待",
+              "match_count": 3,
+              "loaded": [
+                "execution_plan",
+                "lock_wait_query",
+                "instance_metrics"
+              ]
+            },
+            "duration_ms": 0,
+            "meta": null,
+            "timestamp": 1793331496075,
+            "role": "toolResult"
+          },
+          {
+            "content": [
+              {
+                "text": "按 Topic 里的最慢 SQL 指纹 a1b2c3d4e5f6 查询执行计划，确认访问类型、是否命中索引以及扫描行数。",
+                "type": "text"
+              },
+              {
+                "id": "call-4",
+                "name": "execution_plan",
+                "arguments": {
+                  "instance_id": "db-mysql-001",
+                  "sql_fingerprint": "a1b2c3d4e5f6"
+                },
+                "type": "toolCall"
+              }
+            ],
+            "stop_reason": "toolUse",
+            "error_message": null,
+            "timestamp": 1793331496078,
+            "provider": "mock",
+            "model": "mock-dba",
+            "role": "assistant"
+          },
+          {
+            "tool_call_id": "call-4",
+            "tool_name": "execution_plan",
+            "content": [
+              {
+                "text": "{\n  \"mock\": true,\n  \"source\": \"explain_service (mock)\",\n  \"sql_fingerprint\": \"a1b2c3d4e5f6\",\n  \"plan\": [\n    {\n      \"id\": 1,\n      \"select_type\": \"SIMPLE\",\n      \"table\": \"orders\",\n      \"type\": \"ALL\",\n      \"possible_keys\": \"idx_user_created\",\n      \"key\": null,\n      \"key_len\": null,\n      \"ref\": null,\n      \"rows\": 185000,\n      \"filtered\": 10.0,\n      \"Extra\": \"Using where; Using filesort\"\n    }\n  ],\n  \"estimated_rows\": 185000,\n  \"actual_rows_examined\": 185000,\n  \"actual_rows_sent\": 20,\n  \"extra\": [\n    \"Using where\",\n    \"Using filesort\"\n  ],\n  \"note\": \"执行计划来自模拟 EXPLAIN，只用于验证流程，不代表真实执行计划。\"\n}",
+                "type": "text"
+              }
+            ],
+            "is_error": false,
+            "details": {
+              "mock": true,
+              "source": "explain_service (mock)",
+              "sql_fingerprint": "a1b2c3d4e5f6",
+              "full_scan": true,
+              "access_type": "ALL",
+              "key": null,
+              "estimated_rows": 185000,
+              "actual_rows_sent": 20,
+              "extra": [
+                "Using where",
+                "Using filesort"
+              ]
+            },
+            "duration_ms": 0,
+            "meta": {
+              "evidence_id": "ev-000002",
+              "truncated": false,
+              "raw_size_chars": 604,
+              "max_inline_chars": 4000
+            },
+            "timestamp": 1793331496079,
+            "role": "toolResult"
+          },
+          {
+            "content": [
+              {
+                "text": "最后补两类辅助证据：实例监控用于判断资源瓶颈，锁等待用于判断是否存在等待样本。",
+                "type": "text"
+              },
+              {
+                "id": "call-5",
+                "name": "instance_metrics",
+                "arguments": {
+                  "instance_id": "db-mysql-001",
+                  "start_time": "2026-10-29T10:00:00+08:00",
+                  "end_time": "2026-10-29T11:00:00+08:00"
+                },
+                "type": "toolCall"
+              },
+              {
+                "id": "call-6",
+                "name": "lock_wait_query",
+                "arguments": {
+                  "instance_id": "db-mysql-001",
+                  "start_time": "2026-10-29T10:00:00+08:00",
+                  "end_time": "2026-10-29T11:00:00+08:00"
+                },
+                "type": "toolCall"
+              }
+            ],
+            "stop_reason": "toolUse",
+            "error_message": null,
+            "timestamp": 1793331496081,
+            "provider": "mock",
+            "model": "mock-dba",
+            "role": "assistant"
+          },
+          {
+            "tool_call_id": "call-5",
+            "tool_name": "instance_metrics",
+            "content": [
+              {
+                "text": "实例监控接口超时（模拟）：等待 5 秒仍未返回，CPU、IO 等监控数据未获取到，不能据此判断实例负载是否正常。",
+                "type": "text"
+              }
+            ],
+            "is_error": true,
+            "details": {},
+            "duration_ms": 51,
+            "meta": {
+              "evidence_id": "ev-000003",
+              "truncated": false,
+              "raw_size_chars": 56,
+              "max_inline_chars": 4000
+            },
+            "timestamp": 1793331496134,
+            "role": "toolResult"
+          },
+          {
+            "tool_call_id": "call-6",
+            "tool_name": "lock_wait_query",
+            "content": [
+              {
+                "text": "{\n  \"mock\": true,\n  \"instance_id\": \"db-mysql-001\",\n  \"requested_range\": {\n    \"start\": \"2026-10-29T10:00:00+08:00\",\n    \"end\": \"2026-10-29T11:00:00+08:00\"\n  },\n  \"status\": \"no_data\",\n  \"samples\": [],\n  \"source\": \"lock_wait_service (mock)\",\n  \"coverage\": {\n    \"start\": \"2026-10-29T10:00:00+08:00\",\n    \"end\": \"2026-10-29T11:00:00+08:00\",\n    \"coverage_ratio\": 1.0\n  },\n  \"note\": \"采样窗口内没有锁等待样本；无样本不等于没有锁等待\"\n}",
+                "type": "text"
+              }
+            ],
+            "is_error": false,
+            "details": {
+              "mock": true,
+              "source": "lock_wait_service (mock)",
+              "status": "no_data",
+              "sample_count": 0
+            },
+            "duration_ms": 0,
+            "meta": {
+              "evidence_id": "ev-000004",
+              "truncated": false,
+              "raw_size_chars": 407,
+              "max_inline_chars": 4000
+            },
+            "timestamp": 1793331496136,
+            "role": "toolResult"
+          },
+          {
+            "content": [
+              {
+                "text": "# 慢 SQL 工单调查报告（模拟 · 第 2 步）\n\n## 现象\n- 工单 `TCK-20261029-001` 报告：订单列表查询变慢，部分请求超时\n- 实例：`db-mysql-001`；业务库：`shop_order`\n- 慢日志观测：最慢 SQL 指纹 a1b2c3d4e5f6：平均 2380 ms，最大 8120 ms，出现 1240 次，平均扫描 185000 行、返回 20 行（证据 `ev-000001`）\n- 执行计划观测：执行计划访问类型 ALL，未命中索引，估算扫描 185000 行，Extra：Using where, Using filesort（证据 `ev-000002`）\n\n## 调查过程\n| # | 工具 | 结果 | 证据 |\n| --- | --- | --- | --- |\n| 1 | `slow_log_query`（慢日志查询） | 成功：最慢指纹 `a1b2c3d4e5f6`，平均 2380 ms | `ev-000001` |\n| 2 | `evidence_read`（证据读取） | 读取证据 `ev-000001`：offset=4000, limit=800, 总 16658 字符，后面还有内容 | — |\n| 3 | `search_tools`（工具搜索） | 加载了 3 个工具：execution_plan, lock_wait_query, instance_metrics | — |\n| 4 | `execution_plan`（执行计划） | 成功：访问类型 `ALL`，索引 `未命中索引` | `ev-000002` |\n| 5 | `instance_metrics`（实例监控） | 失败，未验证：实例监控接口超时（模拟）：等待 5 秒仍未返回，CPU、IO 等监控数据未获取到，不能据此判断实例负载是否正常。 | `ev-000003` |\n| 6 | `lock_wait_query`（锁等待） | no_data：样本数 0 | `ev-000004` |\n\n> Skill：`slow-sql`（慢 SQL 调查）。初始只开放 `slow_log_query`，其余工具通过 `search_tools` 按需加载；大结果保存到 `evidence/`，本次还调用了 `evidence_read` 分段读取。\n> 本轮上下文预算：模型输入约 11799/12000 字符（字符估算，不是 token）；保留最近 7 条消息，丢弃 4 条旧消息，另有 0 条工具结果被二次裁剪。\n\n## 证据\n- **slow_log.top**：最慢 SQL 指纹 a1b2c3d4e5f6：平均 2380 ms，最大 8120 ms，出现 1240 次，平均扫描 185000 行、返回 20 行（证据 `ev-000001`）\n- **slow_log.coverage**：慢日志采样覆盖率约 0.92，不代表全量请求（证据 `ev-000001`）\n- **execution_plan.access**：执行计划访问类型 ALL，未命中索引，估算扫描 185000 行，Extra：Using where, Using filesort（证据 `ev-000002`）\n- **lock_wait.samples**：锁等待查询返回 no_data：采样窗口内没有样本（证据 `ev-000004`）\n\n### 未决问题\n- 工具 instance_metrics 执行失败，相关结论未验证：实例监控接口超时（模拟）：等待 5 秒仍未返回，CPU、IO 等监控数据未获取到，不能据此判断实例负载是否正常。\n- 无锁等待样本不等于没有锁等待，需要更长窗口或其它采样源复核\n\n## 候选原因\n- **[有观测支持] access_path**：最慢 SQL 执行计划显示全表扫描，可能无法有效利用现有索引；这是有观测支持的推断，仍需真实 EXPLAIN ANALYZE 复核（证据：`ev-000001`、`ev-000002`）\n- **[未验证] instance_resource**：实例 CPU/IO 是否成为瓶颈：监控接口失败，尚未验证（证据：`ev-000003`）\n- **[未验证] lock_wait**：锁等待影响：采样窗口内无样本，当前无法确认或排除（证据：`ev-000004`）\n\n## 建议\n1. 在只读副本或测试环境对最慢 SQL 执行 `EXPLAIN ANALYZE`，确认真实扫描行数、回表次数和排序开销。\n2. 核对 SQL 过滤条件与现有索引的定义、选择性，评估是否需要调整联合索引；索引变更要先评估写入影响并走变更流程。\n3. 对比 `LIMIT` 前后的执行计划，确认 `Using filesort` 是否可以消除。\n4. 监控恢复后补充 CPU、IO 数据，确认资源是否成为瓶颈。\n5. 用更长采样窗口或其它采样源复核锁等待。\n6. 所有建议仅用于只读排查；任何索引、参数或 SQL 变更都必须走变更流程。\n\n## 验证方法\n1. 用同一时间范围重新采集慢日志，对比平均耗时和扫描行数是否稳定复现。\n2. 在只读环境对最慢 SQL 执行 `EXPLAIN ANALYZE`，把真实执行计划与本次模拟计划对照。\n3. 补采实例监控和更长窗口的锁等待样本，复核本次未验证项。\n4. 如果调整索引，先在测试库对比调整前后的执行计划和慢日志统计。\n\n## 当前限制\n- 本报告基于**模拟数据**和模拟工具，不代表真实客户、实例或业务事实。\n- 慢日志原始结果约 16658 字符，超过单条内联上限 4000；报告依据证据 `ev-000001` 的摘要和分页读取，没有逐行核对全部行。\n- 实例监控未验证：CPU/IO 是否成为瓶颈无法判断。\n- 锁等待查询为 `no_data`：采样窗口内没有样本，不等于没有锁等待。\n- 本轮只做只读调查和建议，没有执行任何生产变更。",
+                "type": "text"
+              }
+            ],
+            "stop_reason": "stop",
+            "error_message": null,
+            "timestamp": 1793331496172,
+            "provider": "mock",
+            "model": "mock-dba",
+            "role": "assistant"
+          }
+        ],
+        "reason": "completed",
+        "error": null
+      }
+    }
+  ],
+  "next_seq": 243,
+  "has_more": false
+}

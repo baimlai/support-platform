@@ -1,0 +1,28 @@
+{
+  "mock": true,
+  "ticket_id": "TCK-REDIS-HOT-005",
+  "title": "秒杀活动开始后 Redis 单分片 CPU 打满",
+  "description": "活动开始 5 分钟后商品详情接口 p99 从 20ms 升到 480ms，Redis 集群只有一个分片 CPU 接近 100%，其他分片正常。",
+  "symptom": "Redis 集群单分片 CPU 打满，商品详情接口延迟升高，怀疑热点 Key 集中在同一分片。",
+  "tenant_id": "tenant-demo",
+  "instance_id": "redis-cluster-005",
+  "database": "0",
+  "database_type": "redis",
+  "scenario_id": "redis-hot-key-001",
+  "scenario_label": "Redis 单分片热 Key 导致延迟升高",
+  "scenario_mode": true,
+  "skill": "dba-triage",
+  "dataset": "fixtures/mock_dba/redis_hot_key_001.json",
+  "scenario_order": 50,
+  "time_range": {
+    "start": "2026-10-29T10:00:00+08:00",
+    "end": "2026-10-29T11:00:00+08:00"
+  },
+  "investigation_plan": [
+    "统计访问次数最高的 Redis Key",
+    "查看各分片 CPU、op/s 和慢日志",
+    "汇总证据并输出报告"
+  ],
+  "source": "fixture",
+  "mock_note": "工单和工具结果均为模拟数据，仅用于演示 Redis 热 Key 排查流程。"
+}

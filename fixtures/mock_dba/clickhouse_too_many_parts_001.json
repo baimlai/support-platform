@@ -1,0 +1,247 @@
+{
+  "mock": true,
+  "dataset_id": "clickhouse-too-many-parts-001",
+  "database_type": "clickhouse",
+  "instance_id": "ch-analytics-010",
+  "database": "analytics",
+  "scenario": {
+    "label": "ClickHouse 小批量高频写入导致 Parts 积压",
+    "search_query": "ClickHouse Too many parts 小批量写入 system.parts merge query_log",
+    "steps": [
+      {
+        "tool": "clickhouse_query_log",
+        "label": "失败写入与单批行数",
+        "args": {
+          "instance_id": "$instance_id",
+          "start_time": "$start_time",
+          "end_time": "$end_time",
+          "min_duration_ms": 1000,
+          "limit": 10
+        },
+        "reason": "先从 query_log 找失败 INSERT，确认异常码是不是 252 Too many parts、写入批次频率和每批行数。"
+      },
+      {
+        "tool": "clickhouse_parts",
+        "label": "活跃 Parts 与 Merge 积压",
+        "args": {
+          "instance_id": "$instance_id",
+          "database": "analytics",
+          "table": "events"
+        },
+        "reason": "异常码只是结果，继续查 system.parts 和 merges，确认当前分区有多少活跃 part、每个 part 多大、merge 是否追不上写入。"
+      }
+    ],
+    "diagnosis": {
+      "root_cause": "埋点服务按约每秒 6 批、每批 20~60 行的方式持续写入 `analytics.events`，每次 INSERT 都会生成一个新的 part；当前分区活跃 part 已累积到 1842 个，超过 `parts_to_throw_insert=300`，而 merge 吞吐只有约 3.4 个 part/s，追不上 6.1 个 part/s 的写入速度，ClickHouse 因此返回 Code 252 拒绝新写入。",
+      "confidence": "高",
+      "evidence_keys": [
+        "clickhouse.query.too_many_parts",
+        "clickhouse.parts.backlog"
+      ],
+      "boundary": "当前能确认小批量写入和 parts 积压，但没有拿到埋点服务的客户端配置和是否有重试；修复批次大小时要同时评估数据去重。",
+      "fix": {
+        "primary": [
+          "让埋点服务合并写入：单批攒到 1 万~10 万行，或最多等 1~5 秒再提交，避免每 160ms 就产生一个 part。",
+          "开启 ClickHouse `async_insert=1` 并设置 `wait_for_async_insert=1`、合理的 `async_insert_busy_timeout_ms`，由服务端合并小写入。",
+          "写入链路改用 Kafka 引擎或 Buffer 表做缓冲，让后台按较大批次落盘。"
+        ],
+        "alternate": [
+          "把 `PARTITION BY toDate(event_time)` 调整为按月分区，减少分区数量和 merge 压力；这需要重建表并迁移数据。",
+          "在写入端按租户或事件类型拆分多个表，降低单表 parts 压力，但会增加查询复杂度。"
+        ],
+        "mitigation": [
+          "临时停止或降速埋点写入，给后台 merge 时间把活跃 part 降下来；恢复前确认 parts 数低于延迟阈值。",
+          "监控 `parts_to_delay_insert` 和 `parts_to_throw_insert`，提前在 150 个 part 时告警。"
+        ]
+      },
+      "excluded": [
+        "磁盘写满：磁盘使用率约 61%，没有只读或磁盘空间不足错误。",
+        "内存不足：ClickHouse 内存使用率约 54%，失败原因不是 OOM。",
+        "SQL 语法错误：失败 INSERT 都能进入写入阶段，异常码明确是 252。"
+      ],
+      "pending": [
+        "需要确认埋点客户端是否支持批量缓冲，以及失败后是否会重试导致 parts 更多。",
+        "需要评估写入去重：合并批次后如果客户端重试，可能需要 ReplacingMergeTree 或幂等键。"
+      ],
+      "verification": [
+        "调整批大小后观察 `system.parts` 的 active part 数是否从 1842 持续下降。",
+        "确认 `system.query_log` 中 Code 252 的失败数归零。",
+        "观察 merge 吞吐和写入吞吐是否达到平衡，当前分区 part 数稳定在 100 以下。"
+      ],
+      "limitations": [
+        "query_log 和 parts 数据均为模拟采样，真实环境应结合 `system.merges` 和 `system.mutations` 一起看。",
+        "没有采集埋点服务版本和客户端库配置，无法给出具体参数修改位置。"
+      ]
+    }
+  },
+  "tool_results": {
+    "clickhouse_query_log": {
+      "payload": {
+        "mock": true,
+        "instance_id": "ch-analytics-010",
+        "collected_at": "2026-10-29T10:26:00+08:00",
+        "window_minutes": 10,
+        "failed_inserts": 384,
+        "failed_selects": 0,
+        "errors": [
+          {
+            "exception_code": 252,
+            "exception": "Too many parts (300). Merges are processing significantly slower than inserts.",
+            "query_kind": "Insert",
+            "database": "analytics",
+            "table": "events",
+            "count": 384,
+            "first_seen": "2026-10-29T10:16:42+08:00",
+            "last_seen": "2026-10-29T10:25:58+08:00"
+          }
+        ],
+        "insert_profile": {
+          "batches_per_sec": 6.1,
+          "rows_per_batch_min": 18,
+          "rows_per_batch_max": 64,
+          "rows_per_batch_avg": 42,
+          "client": "tracking-ingest",
+          "pods": 8
+        },
+        "thresholds": {
+          "parts_to_delay_insert": 150,
+          "parts_to_throw_insert": 300
+        },
+        "note": "query_log 数据为模拟聚合结果，只展示代表性错误。"
+      },
+      "details": {
+        "summary": "10 分钟 384 次 INSERT 失败，异常码 252 Too many parts；写入约 6.1 批/s，每批平均 42 行；阈值 300",
+        "topic": {
+          "facts": [
+            {
+              "key": "clickhouse.query.too_many_parts",
+              "statement": "10 分钟内 384 次 INSERT 因 Code 252 `Too many parts (300)` 失败；埋点服务 8 个 Pod 合计约 6.1 批/s，每批 18~64 行、平均 42 行；parts_to_throw_insert=300",
+              "data": {
+                "exception_code": 252,
+                "failed_inserts_10m": 384,
+                "table": "analytics.events",
+                "batches_per_sec": 6.1,
+                "rows_per_batch_min": 18,
+                "rows_per_batch_max": 64,
+                "rows_per_batch_avg": 42,
+                "client": "tracking-ingest",
+                "pods": 8,
+                "parts_to_throw_insert": 300
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "too_many_parts",
+              "statement": "写入失败的直接原因是 parts 数超过阈值",
+              "status": "supported"
+            },
+            {
+              "key": "small_frequent_inserts",
+              "statement": "小批量高频 INSERT 持续制造 part，是 parts 积压的来源",
+              "status": "supported"
+            }
+          ],
+          "open_questions": [
+            "需要确认写入客户端为什么没有批量缓冲"
+          ],
+          "next_steps": [
+            "查看活跃 parts 和 merge 情况",
+            "评估批量写入或异步写入",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    },
+    "clickhouse_parts": {
+      "payload": {
+        "mock": true,
+        "instance_id": "ch-analytics-010",
+        "database": "analytics",
+        "table": "events",
+        "collected_at": "2026-10-29T10:26:06+08:00",
+        "engine": "MergeTree",
+        "partition_key": "toDate(event_time)",
+        "total_active_parts": 5820,
+        "current_partition": {
+          "partition": "20261029",
+          "active_parts": 1842,
+          "rows_total": 77400,
+          "median_rows_per_part": 42,
+          "median_part_size_kb": 16,
+          "max_parts_per_partition": 1842
+        },
+        "partition_count": 96,
+        "merges": {
+          "active_merges": 6,
+          "merge_throughput_parts_per_sec": 3.4,
+          "avg_merge_duration_seconds": 11.8,
+          "insert_rate_parts_per_sec": 6.1
+        },
+        "disk": {
+          "used_percent": 61,
+          "free_gb": 780
+        },
+        "memory": {
+          "used_percent": 54
+        },
+        "note": "parts 数据为模拟快照；真实环境查询 system.parts 和 system.merges。"
+      },
+      "details": {
+        "summary": "当前分区 1842 个活跃 part、每 part 中位 42 行/16KB，远超 300 阈值；merge 吞吐 3.4 part/s，写入 6.1 part/s，磁盘 61%、内存 54%",
+        "topic": {
+          "facts": [
+            {
+              "key": "clickhouse.parts.backlog",
+              "statement": "当前分区 20261029 有 1842 个活跃 part，每个 part 中位仅 42 行/16KB；整表 96 个分区共 5820 个活跃 part；merge 吞吐 3.4 part/s，写入 6.1 part/s，磁盘 61%、内存 54%",
+              "data": {
+                "engine": "MergeTree",
+                "partition_key": "toDate(event_time)",
+                "current_partition": "20261029",
+                "active_parts_current_partition": 1842,
+                "total_active_parts": 5820,
+                "partition_count": 96,
+                "median_rows_per_part": 42,
+                "median_part_size_kb": 16,
+                "merge_throughput_parts_per_sec": 3.4,
+                "insert_rate_parts_per_sec": 6.1,
+                "disk_used_percent": 61,
+                "memory_used_percent": 54
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "parts_backlog",
+              "statement": "当前分区 parts 远超阈值，merge 追不上写入",
+              "status": "supported"
+            },
+            {
+              "key": "partition_granularity",
+              "statement": "按天分区且表历史较长，产生 96 个分区，增加 merge 调度压力",
+              "status": "supported"
+            },
+            {
+              "key": "disk_full",
+              "statement": "磁盘不足导致写入失败",
+              "status": "excluded"
+            }
+          ],
+          "open_questions": [
+            "需要确认埋点客户端是否支持批量缓冲",
+            "需要确认历史分区是否必须保留"
+          ],
+          "next_steps": [
+            "合并写入批次或开启异步写入",
+            "清理或归档历史分区",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    }
+  }
+}

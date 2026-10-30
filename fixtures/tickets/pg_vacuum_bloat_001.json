@@ -1,0 +1,28 @@
+{
+  "mock": true,
+  "ticket_id": "TCK-PG-BLOAT-003",
+  "title": "订单表查询越来越慢，磁盘占用持续上涨",
+  "description": "订单列表接口近一周逐步变慢，pg_stat_user_tables 显示 public.orders 死元组很多，autovacuum 最近没有成功执行。",
+  "symptom": "订单表查询延迟上升、磁盘占用上涨，怀疑表膨胀且 autovacuum 被长事务阻塞。",
+  "tenant_id": "tenant-demo",
+  "instance_id": "db-pg-003",
+  "database": "appdb",
+  "database_type": "postgresql",
+  "scenario_id": "pg-autovacuum-bloat-001",
+  "scenario_label": "PostgreSQL 长事务阻塞 autovacuum 导致表膨胀",
+  "scenario_mode": true,
+  "skill": "dba-triage",
+  "dataset": "fixtures/mock_dba/pg_vacuum_bloat_001.json",
+  "scenario_order": 30,
+  "time_range": {
+    "start": "2026-10-29T10:00:00+08:00",
+    "end": "2026-10-29T11:00:00+08:00"
+  },
+  "investigation_plan": [
+    "查询 PostgreSQL 活动会话和长事务",
+    "查询订单表死元组与膨胀统计",
+    "汇总证据并输出报告"
+  ],
+  "source": "fixture",
+  "mock_note": "工单和工具结果均为模拟数据，仅用于演示表膨胀排查流程。"
+}

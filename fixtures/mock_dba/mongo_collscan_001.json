@@ -1,0 +1,314 @@
+{
+  "mock": true,
+  "dataset_id": "mongo-collscan-001",
+  "database_type": "mongodb",
+  "instance_id": "mongo-shard-007",
+  "database": "commerce",
+  "scenario": {
+    "label": "MongoDB 缺少复合索引导致全集合扫描",
+    "search_query": "MongoDB profiler COLLSCAN 慢查询 explain 复合索引 orders",
+    "steps": [
+      {
+        "tool": "mongo_profiler",
+        "label": "Profiler 中的慢操作",
+        "args": {
+          "instance_id": "$instance_id",
+          "start_time": "$start_time",
+          "end_time": "$end_time",
+          "min_duration_ms": 500,
+          "limit": 10
+        },
+        "reason": "先从 profiler 找耗时超过 500ms 的操作，看慢查询的集合、过滤条件、扫描文档数和执行计划摘要。"
+      },
+      {
+        "tool": "mongo_explain",
+        "label": "慢查询执行计划",
+        "args": {
+          "instance_id": "$instance_id",
+          "database": "commerce",
+          "collection": "orders",
+          "filter_json": "{\"status\":\"PENDING\",\"createdAt\":{\"$gte\":\"2026-09-01T00:00:00Z\"}}"
+        },
+        "reason": "profiler 显示 COLLSCAN 后，对同一条查询执行 explain，确认 winningPlan、扫描文档数和可用索引，判断是不是缺少索引。"
+      },
+      {
+        "tool": "mongo_server_status",
+        "label": "主节点资源使用",
+        "args": {
+          "instance_id": "$instance_id"
+        },
+        "reason": "最后查 serverStatus，确认 CPU、WiredTiger cache 和磁盘 IO 是否被全集合扫描拖高，排除其他资源瓶颈。"
+      }
+    ],
+    "diagnosis": {
+      "root_cause": "运营后台按 `status` 和 `createdAt` 筛选订单，但 `commerce.orders` 只有 `_id` 索引，没有 `{status: 1, createdAt: -1}` 复合索引；查询退化成 COLLSCAN，每次扫描约 284 万份文档只返回 50 条，单次约 1.8 秒，并把主节点 CPU 推到 87%。",
+      "confidence": "高",
+      "evidence_keys": [
+        "mongo.profiler.collscan",
+        "mongo.explain.index_gap",
+        "mongo.server.cpu"
+      ],
+      "boundary": "当前能确认执行计划和索引缺口，但尚未在线上创建索引；真实变更需要评估索引构建期间的 IO 和磁盘空间。",
+      "fix": {
+        "primary": [
+          "在 `commerce.orders` 上创建复合索引 `{status: 1, createdAt: -1}`，让筛选和按时间倒序共用同一个索引；先在从节点或测试环境验证执行计划。",
+          "把运营后台查询改为强制分页（例如每页 50 条）并带上时间范围，避免一次扫描过大区间。",
+          "上线后再次执行 explain，确认 winningPlan 从 COLLSCAN 变为 IXSCAN，docsExamined 接近 nReturned。"
+        ],
+        "alternate": [
+          "如果还会按商家维度筛选，评估扩展为 `{merchantId: 1, status: 1, createdAt: -1}`，但要注意索引前缀和写入成本。",
+          "对历史订单按时间归档，减少单集合文档总量。"
+        ],
+        "mitigation": [
+          "短期对运营后台的订单筛选接口限流或加缓存，降低主节点压力。",
+          "在低峰期构建索引，并监控 WiredTiger cache 和磁盘 IO；必要时使用滚动方式在从节点先建。"
+        ]
+      },
+      "excluded": [
+        "索引存在但未被使用：explain 显示集合只有 `_id` 索引，不存在可用的状态/时间索引。",
+        "内存不足：WiredTiger cache 使用率约 68%，没有频繁 eviction，慢在扫描量而不是缓存换出。",
+        "磁盘 IO 饱和：磁盘利用率约 41%，CPU 升高是扫描大量文档的结果。"
+      ],
+      "pending": [
+        "需要确认运营后台是否还有按其他字段组合筛选的查询，避免只建一个索引覆盖不全。",
+        "需要确认订单集合的写入量，评估新增索引对写入延迟的影响。"
+      ],
+      "verification": [
+        "创建索引后重新执行 explain，确认使用 IXSCAN 且 docsExamined 从百万级降到几十条。",
+        "观察 profiler 中该查询的耗时是否从 1.8 秒降到 50ms 以内。",
+        "对比主节点 CPU 和磁盘读 IOPS 是否回落。"
+      ],
+      "limitations": [
+        "profiler 数据来自模拟采样，只保留代表性慢操作。",
+        "没有拿到运营后台的实际查询代码，过滤条件根据 profiler 还原。"
+      ]
+    }
+  },
+  "tool_results": {
+    "mongo_profiler": {
+      "payload": {
+        "mock": true,
+        "instance_id": "mongo-shard-007",
+        "collected_at": "2026-10-29T10:20:00+08:00",
+        "namespace": "commerce.orders",
+        "slow_ops": [
+          {
+            "op": "query",
+            "namespace": "commerce.orders",
+            "filter": {
+              "status": "PENDING",
+              "createdAt": {"$gte": "2026-09-01T00:00:00Z"}
+            },
+            "sort": {"createdAt": -1},
+            "plan_summary": "COLLSCAN",
+            "docs_examined": 2840000,
+            "n_returned": 50,
+            "duration_ms": 1820,
+            "count_10m": 3841,
+            "app_name": "ops-console"
+          },
+          {
+            "op": "query",
+            "namespace": "commerce.orders",
+            "filter": {"orderNo": "SO202610290001"},
+            "plan_summary": "IXSCAN { orderNo: 1 }",
+            "docs_examined": 1,
+            "n_returned": 1,
+            "duration_ms": 3,
+            "count_10m": 920,
+            "app_name": "order-api"
+          }
+        ],
+        "note": "profiler 只保留慢于 500ms 的操作；数据为模拟采样。"
+      },
+      "details": {
+        "summary": "`commerce.orders` 的状态+时间筛选 10 分钟执行 3841 次，planSummary 为 COLLSCAN，扫描 284 万文档只返回 50 条，单次 1820ms",
+        "topic": {
+          "facts": [
+            {
+              "key": "mongo.profiler.collscan",
+              "statement": "`commerce.orders` 按 status+createdAt 筛选的查询 10 分钟执行 3841 次，planSummary 为 COLLSCAN，扫描 284 万文档只返回 50 条，单次耗时 1820ms，来源应用 ops-console",
+              "data": {
+                "namespace": "commerce.orders",
+                "filter": {
+                  "status": "PENDING",
+                  "createdAt": {"$gte": "2026-09-01T00:00:00Z"}
+                },
+                "plan_summary": "COLLSCAN",
+                "docs_examined": 2840000,
+                "n_returned": 50,
+                "duration_ms": 1820,
+                "count_10m": 3841,
+                "app_name": "ops-console"
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "collscan",
+              "statement": "慢查询正在对订单集合做全集合扫描",
+              "status": "supported"
+            },
+            {
+              "key": "missing_index",
+              "statement": "状态和创建时间组合可能缺少索引",
+              "status": "unverified"
+            }
+          ],
+          "open_questions": [
+            "需要确认 orders 集合实际有哪些索引"
+          ],
+          "next_steps": [
+            "执行 explain 确认访问计划",
+            "查看主节点资源",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    },
+    "mongo_explain": {
+      "payload": {
+        "mock": true,
+        "instance_id": "mongo-shard-007",
+        "database": "commerce",
+        "collection": "orders",
+        "collected_at": "2026-10-29T10:20:06+08:00",
+        "query_planner": {
+          "winning_plan": "COLLSCAN",
+          "rejected_plans": ["IXSCAN { _id: 1 }"],
+          "stage": "COLLSCAN",
+          "direction": "forward"
+        },
+        "execution_stats": {
+          "n_returned": 50,
+          "total_docs_examined": 2840000,
+          "total_keys_examined": 0,
+          "execution_time_ms": 1786
+        },
+        "indexes": [
+          {"name": "_id_", "key": {"_id": 1}},
+          {"name": "orderNo_1", "key": {"orderNo": 1}}
+        ],
+        "recommended_index": {"status": 1, "createdAt": -1},
+        "note": "explain 结果来自模拟执行，不实际创建索引。"
+      },
+      "details": {
+        "summary": "winningPlan 为 COLLSCAN，orders 只有 `_id` 和 `orderNo` 索引，没有 `{status, createdAt}` 复合索引；扫描 284 万文档返回 50 条",
+        "topic": {
+          "facts": [
+            {
+              "key": "mongo.explain.index_gap",
+              "statement": "explain 显示 winningPlan 是 COLLSCAN，`commerce.orders` 只有 `_id_` 和 `orderNo_1` 索引，缺少 `{status: 1, createdAt: -1}`；totalDocsExamined 284 万、nReturned 仅 50",
+              "data": {
+                "winning_plan": "COLLSCAN",
+                "indexes": ["_id_", "orderNo_1"],
+                "recommended_index": {"status": 1, "createdAt": -1},
+                "total_docs_examined": 2840000,
+                "n_returned": 50,
+                "execution_time_ms": 1786
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "missing_compound_index",
+              "statement": "缺少状态+创建时间的复合索引，查询只能全集合扫描",
+              "status": "supported"
+            },
+            {
+              "key": "index_ineffective",
+              "statement": "已有索引失效或选错索引",
+              "status": "excluded"
+            }
+          ],
+          "open_questions": [
+            "需要确认是否还有其他组合筛选条件"
+          ],
+          "next_steps": [
+            "评估创建复合索引",
+            "查看主节点资源",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    },
+    "mongo_server_status": {
+      "payload": {
+        "mock": true,
+        "instance_id": "mongo-shard-007",
+        "collected_at": "2026-10-29T10:20:12+08:00",
+        "role": "primary",
+        "cpu": {
+          "user_percent": 71,
+          "system_percent": 16,
+          "total_percent": 87
+        },
+        "connections": {
+          "current": 620,
+          "available": 380
+        },
+        "wiredtiger": {
+          "cache_used_gb": 10.9,
+          "cache_max_gb": 16.0,
+          "cache_used_ratio": 0.68,
+          "pages_evicted_per_sec": 120
+        },
+        "disk": {
+          "read_iops": 6800,
+          "write_iops": 1200,
+          "util_percent": 41,
+          "await_ms": 6.2
+        },
+        "queues": {
+          "read_queue": 2,
+          "write_queue": 0
+        },
+        "note": "资源指标为模拟快照，CPU 高与全集合扫描一致。"
+      },
+      "details": {
+        "summary": "主节点 CPU 87%，WiredTiger cache 68%，磁盘利用率 41%；CPU 高但磁盘未饱和，符合扫描放大",
+        "topic": {
+          "facts": [
+            {
+              "key": "mongo.server.cpu",
+              "statement": "主节点 CPU 87%，WiredTiger cache 使用率 68%，磁盘利用率 41%、await 6.2ms；资源瓶颈是扫描导致的 CPU，不是内存或磁盘饱和",
+              "data": {
+                "role": "primary",
+                "cpu_total_percent": 87,
+                "wiredtiger_cache_used_ratio": 0.68,
+                "disk_util_percent": 41,
+                "disk_await_ms": 6.2
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "cpu_from_scan",
+              "statement": "CPU 升高是大量文档扫描的结果，不是独立根因",
+              "status": "supported"
+            },
+            {
+              "key": "memory_pressure",
+              "statement": "WiredTiger cache 不足导致换出",
+              "status": "excluded"
+            }
+          ],
+          "open_questions": [
+            "需要确认索引构建期间的磁盘余量"
+          ],
+          "next_steps": [
+            "创建复合索引并验证执行计划",
+            "观察 CPU 回落",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    }
+  }
+}

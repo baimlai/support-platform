@@ -1,0 +1,317 @@
+{
+  "mock": true,
+  "dataset_id": "redis-memory-eviction-001",
+  "database_type": "redis",
+  "instance_id": "redis-cache-006",
+  "database": "0",
+  "scenario": {
+    "label": "Redis 内存达到上限触发持续淘汰",
+    "search_query": "Redis 内存 maxmemory 淘汰策略 命中率 大Key TTL",
+    "steps": [
+      {
+        "tool": "redis_info",
+        "label": "内存、淘汰策略与命中率",
+        "args": {
+          "instance_id": "$instance_id",
+          "section": "all"
+        },
+        "reason": "先看 Redis INFO，确认内存是否真的接近 maxmemory、淘汰策略是什么、已经淘汰了多少 key，以及命中率变化。"
+      },
+      {
+        "tool": "redis_key_stats",
+        "label": "大 Key 与无过期时间的 Key",
+        "args": {
+          "instance_id": "$instance_id",
+          "limit": 10
+        },
+        "reason": "内存达到上限通常有大 Key 或没有 TTL 的 Key 在持续堆积，继续统计内存占用最高的 Key 和 TTL 分布。"
+      },
+      {
+        "tool": "redis_slowlog",
+        "label": "淘汰期间的命令延迟",
+        "args": {
+          "instance_id": "$instance_id",
+          "limit": 10
+        },
+        "reason": "最后查 SLOWLOG，确认淘汰和内存压力是否已经影响到在线命令的耗时。"
+      }
+    ],
+    "diagnosis": {
+      "root_cause": "凌晨的商品快照任务写入了 642MB 的 `product:snapshot:all` 大 Key 且没有设置 TTL，同时约 18 万个商品缓存 Key 也没有过期时间；实例内存从 5.1GB 涨到 7.94GB（maxmemory 的 99.2%），`allkeys-lru` 在 1 小时内淘汰约 124 万个 Key，把仍在被访问的商品缓存也淘汰掉，导致命中率从 94% 降到 61%。",
+      "confidence": "高",
+      "evidence_keys": [
+        "redis.memory.eviction",
+        "redis.key.large_no_ttl",
+        "redis.slowlog.eviction"
+      ],
+      "boundary": "当前能确认内存压力、淘汰和大 Key 同时存在，但没有拿到快照任务的代码和调度记录；需要业务侧确认该 Key 是否仍被使用后再删除。",
+      "fix": {
+        "primary": [
+          "把 `product:snapshot:all` 快照迁到对象存储或离线文件，不要放在 Redis 热实例；如果必须保留，设置明确 TTL 并评估分片存储。",
+          "为商品缓存统一设置 TTL（例如 30 分钟~2 小时，加随机抖动），避免大量 Key 永不过期；上线前统计 TTL 覆盖率。",
+          "把淘汰策略从 `allkeys-lru` 改为 `volatile-lru` 之前，先确保绝大多数 Key 都有 TTL，否则会退化成无法淘汰并触发写入错误。"
+        ],
+        "alternate": [
+          "按业务拆分缓存实例，把商品快照、会话、商品详情放到不同实例，避免互相挤占内存。",
+          "扩容实例内存或增加分片，但扩容前应先清理无 TTL 的大 Key，否则会继续增长。"
+        ],
+        "mitigation": [
+          "临时删除确认无用的快照 Key，观察内存和淘汰数是否立刻下降。",
+          "对商品回源接口限流，避免缓存击穿后数据库被打满。"
+        ]
+      },
+      "excluded": [
+        "热 Key 导致单分片压力：Key 访问分布相对均匀，没有出现单个 Key 占据大部分 QPS 的情况。",
+        "网络故障：INFO 和 SLOWLOG 都能正常返回，延迟主要来自内存淘汰，不是连接超时。"
+      ],
+      "pending": [
+        "需要确认快照任务的调度方和保留策略，以及 `product:snapshot:all` 是否还有读方。",
+        "需要统计全量 Key 的 TTL 覆盖率，评估切换 `volatile-lru` 的安全性。"
+      ],
+      "verification": [
+        "清理快照 Key 并为商品缓存补齐 TTL 后，观察 used_memory 是否降到 70% 以下、evicted_keys 是否停止增长。",
+        "对比修复前后的缓存命中率和商品详情接口 p99。",
+        "持续观察 24 小时，确认凌晨快照任务不会再制造无 TTL 大 Key。"
+      ],
+      "limitations": [
+        "没有客户端侧缓存使用记录，无法量化哪些商品缓存被淘汰后回源。",
+        "大 Key 统计基于模拟采样，真实环境应使用 `--bigkeys` 或 `MEMORY USAGE` 复核。"
+      ]
+    }
+  },
+  "tool_results": {
+    "redis_info": {
+      "payload": {
+        "mock": true,
+        "instance_id": "redis-cache-006",
+        "collected_at": "2026-10-29T10:16:00+08:00",
+        "memory": {
+          "used_memory_gb": 7.94,
+          "maxmemory_gb": 8.0,
+          "used_memory_ratio": 0.9925,
+          "maxmemory_policy": "allkeys-lru",
+          "mem_fragmentation_ratio": 1.18,
+          "evicted_keys_1h": 1240000,
+          "expired_keys_1h": 86000
+        },
+        "stats": {
+          "keyspace_hits": 18200000,
+          "keyspace_misses": 11600000,
+          "hit_rate": 0.61,
+          "baseline_hit_rate": 0.94,
+          "ops_per_sec": 96000
+        },
+        "cpu": {
+          "used_cpu_sys_percent": 38,
+          "used_cpu_user_percent": 54
+        },
+        "clients": {
+          "connected_clients": 2100,
+          "blocked_clients": 0
+        },
+        "note": "数据为模拟 INFO 摘要，命中率已按 1 小时窗口计算。"
+      },
+      "details": {
+        "summary": "内存 7.94GB / 8GB（99.2%），策略 allkeys-lru，1 小时淘汰 124 万 key；命中率 61%，基线 94%",
+        "topic": {
+          "facts": [
+            {
+              "key": "redis.memory.eviction",
+              "statement": "used_memory 7.94GB / maxmemory 8GB（99.2%），淘汰策略 `allkeys-lru`，1 小时淘汰约 124 万个 Key；缓存命中率 61%，基线 94%",
+              "data": {
+                "used_memory_gb": 7.94,
+                "maxmemory_gb": 8.0,
+                "used_memory_ratio": 0.9925,
+                "maxmemory_policy": "allkeys-lru",
+                "evicted_keys_1h": 1240000,
+                "hit_rate": 0.61,
+                "baseline_hit_rate": 0.94
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "memory_pressure",
+              "statement": "内存压力已经触发持续淘汰，是命中率下降的直接原因",
+              "status": "supported"
+            },
+            {
+              "key": "hot_key",
+              "statement": "单 Key 热点导致淘汰",
+              "status": "unverified"
+            }
+          ],
+          "open_questions": [
+            "需要确认是哪些 Key 占用了内存"
+          ],
+          "next_steps": [
+            "统计大 Key 和 TTL 分布",
+            "查看慢命令",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    },
+    "redis_key_stats": {
+      "payload": {
+        "mock": true,
+        "instance_id": "redis-cache-006",
+        "collected_at": "2026-10-29T10:16:06+08:00",
+        "top_keys_by_memory": [
+          {
+            "key": "product:snapshot:all",
+            "type": "string",
+            "memory_mb": 642,
+            "ttl_seconds": -1,
+            "shard": 2,
+            "qps": 0.2,
+            "note": "凌晨快照任务写入，无过期时间，近 24 小时几乎没有读取"
+          },
+          {
+            "key": "product:detail:batch:20261029",
+            "type": "hash",
+            "memory_mb": 318,
+            "ttl_seconds": -1,
+            "shard": 1,
+            "qps": 12
+          },
+          {
+            "key": "session:last_seen",
+            "type": "hash",
+            "memory_mb": 186,
+            "ttl_seconds": 2592000,
+            "shard": 3,
+            "qps": 1800
+          }
+        ],
+        "ttl_summary": {
+          "total_keys_estimate": 5200000,
+          "keys_without_ttl_estimate": 1800000,
+          "product_cache_keys_without_ttl": 180000,
+          "largest_key_mb": 642
+        },
+        "note": "数据为模拟采样，不遍历全库；无 TTL 数量为估算值。"
+      },
+      "details": {
+        "summary": "`product:snapshot:all` 单 Key 642MB 且无 TTL、近 24 小时几乎不读；约 18 万商品缓存 Key 没有 TTL",
+        "topic": {
+          "facts": [
+            {
+              "key": "redis.key.large_no_ttl",
+              "statement": "`product:snapshot:all` 占 642MB、TTL 为 -1（永不过期）、近 24 小时 QPS 仅 0.2；另有约 18 万商品缓存 Key 没有 TTL，估算 180 万个 Key 无过期时间",
+              "data": {
+                "key": "product:snapshot:all",
+                "memory_mb": 642,
+                "ttl_seconds": -1,
+                "qps": 0.2,
+                "shard": 2,
+                "product_cache_keys_without_ttl": 180000,
+                "keys_without_ttl_estimate": 1800000,
+                "total_keys_estimate": 5200000
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "large_key_without_ttl",
+              "statement": "无 TTL 的快照大 Key 占用大量内存，并长期不被访问",
+              "status": "supported"
+            },
+            {
+              "key": "missing_ttl",
+              "statement": "大量商品缓存没有过期时间，使内存无法自然回收",
+              "status": "supported"
+            },
+            {
+              "key": "hot_key",
+              "statement": "存在单个 Key 热点",
+              "status": "excluded"
+            }
+          ],
+          "open_questions": [
+            "需要确认快照 Key 是否还有读方",
+            "需要确认商品缓存为什么没有设置 TTL"
+          ],
+          "next_steps": [
+            "清理快照 Key 或迁移到对象存储",
+            "为商品缓存补齐 TTL",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    },
+    "redis_slowlog": {
+      "payload": {
+        "mock": true,
+        "instance_id": "redis-cache-006",
+        "collected_at": "2026-10-29T10:16:12+08:00",
+        "slowlog": [
+          {
+            "entry_id": 4512,
+            "timestamp": "2026-10-29T10:15:52+08:00",
+            "command": "GET product:detail:88301",
+            "duration_ms": 8.4,
+            "client_addr": "10.30.7.31:52114",
+            "shard": 1
+          },
+          {
+            "entry_id": 4508,
+            "timestamp": "2026-10-29T10:15:41+08:00",
+            "command": "GET product:detail:91520",
+            "duration_ms": 7.9,
+            "client_addr": "10.30.7.31:52092",
+            "shard": 2
+          },
+          {
+            "entry_id": 4499,
+            "timestamp": "2026-10-29T10:15:18+08:00",
+            "command": "GET product:detail:77210",
+            "duration_ms": 7.1,
+            "client_addr": "10.30.7.32:41008",
+            "shard": 3
+          }
+        ],
+        "slowlog_threshold_ms": 5,
+        "note": "慢日志集中在商品详情 GET，符合淘汰后缓存未命中再回源的特征。"
+      },
+      "details": {
+        "summary": "商品详情 GET 在三个分片都出现 7~8.4ms 慢命令，说明不是单个分片热点，而是全局淘汰导致缓存未命中",
+        "topic": {
+          "facts": [
+            {
+              "key": "redis.slowlog.eviction",
+              "statement": "三个分片的商品详情 GET 都出现 7.1~8.4ms 慢命令；分布均匀，符合内存淘汰后大面积缓存未命中，而不是单分片热 Key",
+              "data": {
+                "command": "GET product:detail:*",
+                "duration_ms_max": 8.4,
+                "affected_shards": [1, 2, 3],
+                "slowlog_threshold_ms": 5
+              }
+            }
+          ],
+          "candidates": [
+            {
+              "key": "eviction_impact",
+              "statement": "淘汰导致商品缓存未命中，命令延迟升高且分布均匀",
+              "status": "supported"
+            }
+          ],
+          "open_questions": [
+            "需要确认淘汰后回源给数据库带来了多少额外 QPS"
+          ],
+          "next_steps": [
+            "清理无 TTL 大 Key",
+            "补齐商品缓存 TTL",
+            "汇总证据并输出报告"
+          ]
+        }
+      },
+      "is_error": false,
+      "message": ""
+    }
+  }
+}
