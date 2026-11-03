@@ -431,6 +431,41 @@ class TurnDecision:
     action: Literal["continue", "end"]
 
 
+@dataclass(slots=True)
+class RequestContext:
+    """请求前给 Hook 的快照：完整运行状态、当前模型标识和取消令牌。
+
+    参考 Pi v1.5.0 的 PrepareRequestContext。这里仍用字符串表示模型；
+    真正的供应商协议由适配器处理，不让内核 import HTTP 客户端。
+    """
+
+    context: AgentContext
+    model: str
+    cancellation: CancellationToken
+
+
+@dataclass(slots=True)
+class RequestUpdate:
+    """请求准备 Hook 可替换的状态；None 表示沿用，而不是清空。
+
+    与 transform_context 的区别：后者只返回本轮消息视图，这里可以替换
+    后续运行使用的整个 context 或模型标识。切换供应商还需要相应的模型适配器。
+    """
+
+    context: AgentContext | None = None
+    model: str | None = None
+
+
+@dataclass(slots=True)
+class NextTurnUpdate(RequestUpdate):
+    """下一轮准备完成后，可额外追加消息；这些消息会正常发开始/结束事件。
+
+    dataclass 也支持继承：父类的 context/model 字段会保留，子类只补 messages。
+    """
+
+    messages: list[Message] = field(default_factory=list)
+
+
 # 钩子统一用异步函数，避免工具执行过程中出现“半同步半异步”的分支。
 BeforeToolCallHook: TypeAlias = Callable[
     [BeforeToolCallContext], Awaitable[BeforeToolCallResult | None]
@@ -441,8 +476,12 @@ AfterToolCallHook: TypeAlias = Callable[
 TransformContextHook: TypeAlias = Callable[
     [list[Message], CancellationToken], Awaitable[list[Message]]
 ]
-ConvertToLlmHook: TypeAlias = Callable[[list[Message]], list[Message]]
+ConvertToLlmHook: TypeAlias = Callable[[list[Message]], list[Message] | Awaitable[list[Message]]]
 FinishTurnHook: TypeAlias = Callable[[TurnContext], Awaitable[TurnDecision | None]]
+PrepareRequestHook: TypeAlias = Callable[[RequestContext], Awaitable[RequestUpdate | None]]
+PrepareNextTurnHook: TypeAlias = Callable[[TurnContext], Awaitable[NextTurnUpdate | None]]
+# 队列由外层 Agent 持有；Loop 只知道“在安全点向这个函数拿消息”。
+QueuedMessagesProvider: TypeAlias = Callable[[], list[Message]]
 
 
 def default_convert_to_llm(messages: list[Message]) -> list[Message]:
@@ -465,7 +504,7 @@ class AgentLoopConfig:
     - `tools_provider`：每轮请求前返回“当前可见、可执行”的工具列表。这是平台为了
       按需加载工具加的扩展：初始只暴露少量工具，模型调用 `search_tools` 后再把
       匹配到的工具放进后续请求。Pi 的 `toolsAdded/toolsRemoved` 增量机制没有完整移植；
-    - 三个钩子对应 Pi 的 `transformContext`、`beforeToolCall`、`afterToolCall`、`finishTurn`。
+    - 钩子对应 Pi 的 `transformContext`、`beforeToolCall`、`afterToolCall`、`finishTurn`。
     """
 
     model: str = "mock-dba"
@@ -477,6 +516,10 @@ class AgentLoopConfig:
     before_tool_call: BeforeToolCallHook | None = None
     after_tool_call: AfterToolCallHook | None = None
     finish_turn: FinishTurnHook | None = None
+    prepare_request: PrepareRequestHook | None = None
+    prepare_next_turn: PrepareNextTurnHook | None = None
+    get_steering_messages: QueuedMessagesProvider | None = None
+    get_follow_up_messages: QueuedMessagesProvider | None = None
 
 
 @dataclass(slots=True)
@@ -676,6 +719,30 @@ class AgentEnd:
     type: Literal["agent_end"] = field(default="agent_end", init=False)
 
 
+@dataclass(slots=True)
+class ModelRetry:
+    """模型请求重试事件；这是平台事件扩展，记录器按普通事件保存。"""
+
+    attempt: int
+    delay_s: float
+    error: str
+    phase: Literal["scheduled", "attempt", "finished"] = "scheduled"
+    turn: int = 0
+    type: Literal["model_retry"] = field(default="model_retry", init=False)
+
+
+@dataclass(slots=True)
+class ContextCompacted:
+    """上下文摘要提交或失败；不把摘要内容再放进事件，全文由证据/运行文件保存。"""
+
+    phase: Literal["completed", "failed"]
+    summarized_messages: int
+    summary_chars: int = 0
+    error: str | None = None
+    turn: int = 0
+    type: Literal["context_compacted"] = field(default="context_compacted", init=False)
+
+
 AgentEvent: TypeAlias = (
     AgentStart
     | TurnStart
@@ -688,6 +755,8 @@ AgentEvent: TypeAlias = (
     | TurnEnd
     | TopicUpdated
     | AgentEnd
+    | ModelRetry
+    | ContextCompacted
 )
 
 EventSink: TypeAlias = Callable[[AgentEvent], Awaitable[None]]

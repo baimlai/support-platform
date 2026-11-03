@@ -1,0 +1,142 @@
+{
+  "review_date": "2026-11-03",
+  "repository": "https://github.com/earendil-works/pi",
+  "baseline_commit": "babe30a7e6c185346c85859da30b58183e5964f0",
+  "baseline_description": "v1.4.0-198-gbabe30a7",
+  "release_tag": "v1.5.0",
+  "release_commit": "f9a26365568127461c47a07a37dcb42c140a3ac5",
+  "release_commit_metadata": "f9a26365568127461c47a07a37dcb42c140a3ac5 2026-11-02T11:38:21+01:00 Release v1.5.0",
+  "release_page": "https://github.com/earendil-works/pi/releases/tag/v1.5.0",
+  "checkout": "outputs/pi-upstream-v1.5.0",
+  "checkout_head_verified": true,
+  "checkout_clean": true,
+  "scope": "拉取官方源码、比较固定提交、评估移植候选；未升级 app/runtime 或改变当前参考提交。",
+  "method": "比较 Git blob ID 判断文件是否逐字节相同；阅读改动补丁、候选模块及本项目对应代码。",
+  "comparisons": [
+    {
+      "path": "packages/agent/src/agent-loop.ts",
+      "baseline_blob": "cfc9401e5581847f6d5a9bb1815ab0f0e663f2e5",
+      "release_blob": "cfc9401e5581847f6d5a9bb1815ab0f0e663f2e5",
+      "identical": true,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/agent/src/agent-loop.ts"
+    },
+    {
+      "path": "packages/agent/src/agent.ts",
+      "baseline_blob": "c0a482d3a499b6baabd61cd1c4eed3f93cb2a9a6",
+      "release_blob": "c0a482d3a499b6baabd61cd1c4eed3f93cb2a9a6",
+      "identical": true,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/agent/src/agent.ts"
+    },
+    {
+      "path": "packages/agent/src/types.ts",
+      "baseline_blob": "dbfba74a084f71951e48285869730b70a405ba3a",
+      "release_blob": "24bdd7531caf7035653255acab9c04e0ef5f485f",
+      "identical": false,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/agent/src/types.ts"
+    },
+    {
+      "path": "packages/ai/src/types.ts",
+      "baseline_blob": "32b5a5f31eee96a01830641eeea105feafc22bf3",
+      "release_blob": "e435126ea0abdcb99a8164f1516954fac2b7ef25",
+      "identical": false,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/ai/src/types.ts"
+    },
+    {
+      "path": "packages/ai/src/utils/validation.ts",
+      "baseline_blob": "c9e818834a9f555d182f14118c908cc77024f411",
+      "release_blob": "586765bf037782948b276983d7be29afb89cf3a8",
+      "identical": false,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/ai/src/utils/validation.ts"
+    },
+    {
+      "path": "packages/ai/src/utils/transcript.ts",
+      "baseline_blob": "6f8a2691faf81b0364f2d29cb5bff812acb64d3c",
+      "release_blob": "e9bec79f8c23b422b8baa542d126e1431c03b0cb",
+      "identical": false,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/ai/src/utils/transcript.ts"
+    },
+    {
+      "path": "packages/ai/src/utils/streaming-json.ts",
+      "baseline_blob": "9f71ae7ec31d45a766872e0672da0db6f0731d00",
+      "release_blob": "9f71ae7ec31d45a766872e0672da0db6f0731d00",
+      "identical": true,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/ai/src/utils/streaming-json.ts"
+    },
+    {
+      "path": "packages/ai/src/utils/json-parse.ts",
+      "baseline_blob": "d6fdce63961b4bd123ca5292ff9828b68fc34ccf",
+      "release_blob": "d6fdce63961b4bd123ca5292ff9828b68fc34ccf",
+      "identical": true,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/ai/src/utils/json-parse.ts"
+    },
+    {
+      "path": "packages/ai/src/utils/retry.ts",
+      "baseline_blob": "a1e98403264e53bfece844f8608c1a342672ed59",
+      "release_blob": "eabf6c7de00a3a28c35da8b03870d7e972e98fce",
+      "identical": false,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/ai/src/utils/retry.ts"
+    },
+    {
+      "path": "packages/ai/src/utils/provider-retry.ts",
+      "baseline_blob": "9d7ef81f25c2773149b0068f24c8005706701ffc",
+      "release_blob": "9d7ef81f25c2773149b0068f24c8005706701ffc",
+      "identical": true,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/ai/src/utils/provider-retry.ts"
+    },
+    {
+      "path": "packages/ai/src/utils/overflow.ts",
+      "baseline_blob": "36ae26b496d2c17f82bc1d60f4ec2ce44b3e648e",
+      "release_blob": "36ae26b496d2c17f82bc1d60f4ec2ce44b3e648e",
+      "identical": true,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/ai/src/utils/overflow.ts"
+    },
+    {
+      "path": "packages/coding-agent/src/core/compaction/compaction.ts",
+      "baseline_blob": "07a58ac6cf6e2141fc07133677583ab18bb97298",
+      "release_blob": "07a58ac6cf6e2141fc07133677583ab18bb97298",
+      "identical": true,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/coding-agent/src/core/compaction/compaction.ts"
+    },
+    {
+      "path": "packages/coding-agent/src/core/tools/truncate.ts",
+      "baseline_blob": "c926c4fbdf8b372386adbc9ffd34c7a0a0d62321",
+      "release_blob": "c926c4fbdf8b372386adbc9ffd34c7a0a0d62321",
+      "identical": true,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/coding-agent/src/core/tools/truncate.ts"
+    },
+    {
+      "path": "packages/durable/src/harness/compaction.ts",
+      "baseline_blob": "e11830f6e909a57ce5d34f054c40583d8c11d4d0",
+      "release_blob": "e11830f6e909a57ce5d34f054c40583d8c11d4d0",
+      "identical": true,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/durable/src/harness/compaction.ts"
+    },
+    {
+      "path": "packages/durable/src/harness/context.ts",
+      "baseline_blob": "aa5660801e816cc49c14aa8612d3bd36305d8c0f",
+      "release_blob": "d41e1a176a2541a7f6b5b8accc2ac72714ea5811",
+      "identical": false,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/durable/src/harness/context.ts"
+    },
+    {
+      "path": "packages/durable/src/search.ts",
+      "baseline_blob": "eb89772a94a18a685cd499b3728828c94655f08c",
+      "release_blob": "9dc6ed5ec194b55de5898acddd14da020f91a9f8",
+      "identical": false,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/durable/src/search.ts"
+    },
+    {
+      "path": "packages/durable/src/tool-search/tool-search.ts",
+      "baseline_blob": "ca600ae5ed2d1268de32327dc061106d7ddbd747",
+      "release_blob": "5d79b007e9b75e5d0fee1a3f5e0556cf162f91bc",
+      "identical": false,
+      "release_source": "https://github.com/earendil-works/pi/blob/f9a26365568127461c47a07a37dcb42c140a3ac5/packages/durable/src/tool-search/tool-search.ts"
+    }
+  ],
+  "new_package": {
+    "path": "packages/schema",
+    "absent_at_baseline": true,
+    "present_at_release": true
+  },
+  "validation": "只进行源码与 Git 对照，未运行上游测试、安装 npm 依赖或调用付费模型；本项目实现未修改。"
+}

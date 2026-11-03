@@ -6,7 +6,8 @@
 ## 1. 参考版本
 
 - 源项目：https://github.com/earendil-works/pi
-- 参考提交：`babe30a7e6c185346c85859da30b58183e5964f0`（2026-10-29）
+- 参考提交：`f9a26365568127461c47a07a37dcb42c140a3ac5`（Pi v1.5.0，2026-11-02）
+- 原始基线：`babe30a7e6c185346c85859da30b58183e5964f0`；新版两个 Agent 主文件与该基线完全相同。
 - 许可证：MIT，Copyright (c) 2025 Mario Zechner
 - 许可证与出处：`app/runtime/pi_reference/NOTICE.md`
 
@@ -34,7 +35,7 @@
 | `finalizeExecutedToolCall` | `_execute_tool_calls` 内的 after 钩子分支 | 只在工具真的执行后调用 |
 | `validateToolArguments` | `loop.py` `_validate_tool_arguments` | 用 JSON Schema 校验，不抛给调用方 |
 | `packages/agent/src/types.ts` 消息/工具/事件类型 | `app/runtime/contracts.py` | 简化后的 Python dataclass |
-| `Agent` 包装类（状态、abort、订阅、队列） | 未移植；由 `run_agent_loop` 的 `emit`、`CancellationToken`、记录器替代 | 本轮单 Agent、本地运行 |
+| `Agent` 包装类（状态、abort、订阅、队列） | `agent.py` 的 `Agent`、`PendingMessageQueue` | 已接入 Runner；HTTP 任务生命周期仍归 TaskService |
 | `EventStream` | 未移植；用异步生成器 + `EventSink` 替代 | 事件顺序保持一致 |
 | `transcript.ts` 的上下文规范化 | `app/harness/context.py` `build_initial_context` | 系统提示词和工具由 Harness 装配 |
 | `validation.ts` 的参数校验 | `_validate_tool_arguments` | 只用 `jsonschema`，不做 TypeBox 式类型转换 |
@@ -114,7 +115,7 @@ Pi 的工具结果只有工具自己的 `details`，没有统一的证据引用�
    - 这样 Harness 可以独立控制上下文，不需要改动内核。
 
 7. **参数校验**
-   - Pi 使用 TypeBox/JSON Schema 并进行类型转换。
+   - Pi v1.5.0 使用 pi-schema 校验任意 JSON Schema 并进行类型转换。
    - 本项目只用 `jsonschema.validate` 做基础校验，不做类型转换，返回深拷贝。
 
 8. **`tools_provider` 动态工具集**
@@ -144,19 +145,16 @@ Pi 的工具结果只有工具自己的 `details`，没有统一的证据引用�
 
 | 内容 | 原因 |
 |---|---|
-| steering / follow-up 队列 | 本轮单 Agent、单次调查，不需要运行中插入新指令 |
-| `prepareNextTurn` | 没有动态切换模型/工具的需求 |
 | 工具声明增删事件（`toolsAdded/toolsRemoved`） | 用 `tools_provider` 每次返回当前集合，不单独发增删事件；需要时下次请求自然带上 |
 | 并行工具执行 | 模拟工具无依赖，顺序执行足够；并行会放大事件排序复杂度 |
 | 图片内容、思考内容 | DBA 工单场景暂不需要 |
 | provider 身份 | 已补：`AssistantMessage.provider/model`、任务快照和每轮模型请求都记录实际模型；usage/cost 统计仍未接 |
-| 重试、跨进程续跑 | 第 3 步只做任务持久化和重启标记 `interrupted`，不自动续跑 |
-| Agent 包装类的订阅机制 | 当前用 `emit` 回调；HTTP 层由 `TaskService` + SQLite 管理任务状态，不复刻 Pi 的订阅队列 |
+| 跨进程续跑 | 重试已补；进程重启仍标记 `interrupted`，不自动恢复执行 |
 | `exec`/bash 等 Pi 内置工具 | 与 DBA 只读调查无关，且本环境不执行任意命令 |
 
 ## 7. 验证
 
-自动化测试共 57 个用例，分七个文件。HTTP 接口层（`app/api/`）和 MCP 接入层
+以下为初始验收时的 57 个用例记录，最新增量和 87 个完整回归结果见第 9 节。HTTP 接口层（`app/api/`）和 MCP 接入层
 （`app/mcp/`）属于平台自有代码，不来自 Pi；Pi 映射只覆盖内核、Harness 和事件契约。
 
 `tests/test_agent_loop.py`（10 个）：
@@ -240,3 +238,34 @@ uv run ruff check .
   - `docs/pi-mapping.md`
   - `outputs/进度与联调.md` 中的接口约定（涉及前端时）
 - 涉及“与 Pi 行为不同”的改动，在 `loop.py` 顶部和本文件第 5 节同时记录原因。
+
+## 9. v1.5.0 增量移植（2026-11-03）
+
+| 上游模块/能力 | Python 文件 | 已接入的调用位置 | 差异与边界 |
+|---|---|---|---|
+| agent.ts：状态/订阅/两种队列 | `app/runtime/pi_reference/agent.py` | Runner → Agent.prompt → Loop | 同一对象禁止并发 prompt；轮数/取消导致未处理的输入会归还队列；不会创建 HTTP 追加消息接口 |
+| runAgentLoopContinue | `loop.py::run_agent_loop_continue` | Agent.continue_run | 继续已有内存上下文；不代表重启恢复 |
+| prepareRequest / prepareNextTurn | `contracts.py` + `_run_turns` | 每次请求前 / 确定继续下一轮时 | 返回 context/model；暂不支持 thinkingLevel；同步钩子暂不支持 |
+| retry.ts / provider-retry.ts / overflow.ts | `retry.py` | Loop → Retry → Recorder → 模型 | 可取消指数退避、永久错误/溢出排除；无 usage 静默溢出识别，不自动压缩后重发，不重跑工具 |
+| durable/search.ts | `search.py` | search_tools → ToolSession.search → rank_documents | 保留字段权重/覆盖数/稳定排序；中文用片段和 DBA 别名，非 Intl.Segmenter 等价实现 |
+| compaction/compaction.ts | `compaction.py` | transform_context → ContextCompactor.transform | 字符估算；前缀摘要、哈希边界、完整工具块；不依赖 SessionEntry，检查点保存但不承诺进程重启恢复 |
+| core/tools/truncate.ts | `truncate.py` | EvidenceProcessor → _bound_content | UTF-8 字节/行双上限；原始证据仍完整保存 |
+
+摘要适配在 `app/adapters/context_summary.py`：mock 明确使用摘录，DeepSeek 才单独请求
+真实摘要模型（无业务工具权限）。摘要为空、被长度截断、超预算、丢引用、取消或写盘失败时，
+不提交新检查点；完整历史不变，继续沿用旧摘要视图和常规裁剪。
+
+新增事件：`model_retry`（scheduled/attempt/finished）、`context_compacted`（completed/failed）。
+模型请求新增 metadata.turn / purpose / retry_attempt / compaction；purpose 区分 conversation 与
+compaction。`TaskService.read_turn_context` 按轮次读取最终尝试，不再把 request_seq 当 turn。
+
+压缩默认关闭：CLI 使用 `--compact`；API 用 `SUPPORT_PLATFORM_COMPACTION_ENABLED=1`。
+临时模型错误默认最多重试 2 次，CLI `--model-retries 0` 可关闭。
+
+验证：`tests/test_runtime_extensions.py` 覆盖 Hook 顺序、上下文替换、队列/继续/取消、
+达到轮数时追问归还、模型重试不重复工具、生成器关闭、摘要失败与落盘边界、排名/中文/UTF-8、
+轮次查询与真实 MCP 的七轮追问。完整回归共 87 个测试通过。
+
+调用链维护：`docs/call-chain.json` 记录函数和动态边，运行
+`python scripts/check_call_chain.py` 检查并刷新 `outputs/QUERY_CALL_CHAIN.md` 的源文件行号。
+新开发者按 `outputs/ARCHITECTURE.md` 和 `outputs/ARCHITECTURE_DIAGRAMS.md` 阅读。

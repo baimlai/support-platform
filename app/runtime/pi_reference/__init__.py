@@ -18,6 +18,12 @@
 所以 import 很快，也不会产生难以清理的状态。写微服务时也要保持这个习惯。
 """
 
-from app.runtime.pi_reference.loop import LoopResult, ToolArgumentError, run_agent_loop
+from app.runtime.pi_reference.agent import Agent
+from app.runtime.pi_reference.loop import (
+    LoopResult,
+    ToolArgumentError,
+    run_agent_loop,
+    run_agent_loop_continue,
+)
 
-__all__ = ["LoopResult", "ToolArgumentError", "run_agent_loop"]
+__all__ = ["Agent", "LoopResult", "ToolArgumentError", "run_agent_loop", "run_agent_loop_continue"]

@@ -3,7 +3,7 @@
 ## 来源
 
 - Pi 仓库：https://github.com/earendil-works/pi
-- 参考提交：`babe30a7e6c185346c85859da30b58183e5964f0`（2026-10-29）
+- 参考提交：`f9a26365568127461c47a07a37dcb42c140a3ac5`（Pi v1.5.0，2026-11-02）
 - 主要参考文件：`packages/agent/src/agent-loop.ts`
 - 配套阅读：`packages/agent/src/types.ts`、`packages/agent/src/agent.ts`、
   `packages/ai/src/types.ts`、`packages/ai/src/utils/transcript.ts`、
@@ -32,9 +32,10 @@ Pi 移植部分：
   因为模拟工具少，顺序执行更容易看懂和排查。
 - 硬取消（`asyncio.CancelledError`）继续向上抛出，只补一个 `agent_end` 记录再抛；
   协作式取消（`CancellationToken`）会产生正常的错误工具结果并结束本轮。
-- 不移植 steering/follow-up 队列、`prepareNextTurn`、工具声明增量（`toolsAdded/toolsRemoved`）、
-  并行工具、图片内容和 provider 身份等。原因：本轮单 Agent、模拟工具、单页工作台用不到，
-  先保持循环小到能逐行读懂。
+- 已补 steering/follow-up 队列、continue、prepareRequest/prepareNextTurn；队列由 agent.py 持有。
+- 工具声明增量（toolsAdded/toolsRemoved）、并行工具、图片和更细模型事件仍暂不移植。
+- Hook 替换上下文时保留 Python 入口对象外壳；原因见 _install_context。
+- 模型流读完终态后显式 aclose，保证多层异步生成器里的 HTTP 清理及时执行。
 
 ## 一个具体例子
 
@@ -72,7 +73,7 @@ import asyncio
 import copy
 import inspect
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import jsonschema
@@ -99,6 +100,7 @@ from app.runtime.contracts import (
     MessageStart,
     MessageUpdate,
     ModelRequest,
+    RequestContext,
     StopReason,
     StreamFn,
     TextContent,
@@ -212,12 +214,12 @@ async def run_agent_loop(
 
     # 第一轮在第一句提示词之前就开始。Pi 也是先发 turn_start，再发提示词的 message 事件。
     turn_no = 1
-    await emit(TurnStart(turn=turn_no))
-    for message in prompts:
-        await emit(MessageStart(message=message, turn=turn_no))
-        await emit(MessageEnd(message=message, turn=turn_no))
-
     try:
+        # 开始事件也放在 try 内：订阅者出错时，按运行错误处理。
+        await emit(TurnStart(turn=turn_no))
+        for message in prompts:
+            await emit(MessageStart(message=message, turn=turn_no))
+            await emit(MessageEnd(message=message, turn=turn_no))
         reason, error, turns = await _run_turns(
             current=current,
             new_messages=new_messages,
@@ -239,7 +241,7 @@ async def run_agent_loop(
             messages=new_messages,
             context=current,
             reason="error",
-            turns=turn_no,
+            turns=int(current.metadata.get("turn", turn_no)),
             error=str(exc),
         )
 
@@ -251,6 +253,25 @@ async def run_agent_loop(
         turns=turns,
         error=error,
     )
+
+
+async def run_agent_loop_continue(
+    context: AgentContext,
+    config: AgentLoopConfig,
+    emit: EventSink,
+    stream_fn: StreamFn,
+    cancellation: CancellationToken | None = None,
+) -> LoopResult:
+    """参考 Pi 的 runAgentLoopContinue：继续现有上下文，不再追加用户工单。
+
+    例如模型请求断网失败，调用方清理失败助手消息后，可从最后的用户消息或
+    工具结果继续。它不是跨进程恢复；调用方仍须提供完整、配对的已有历史。
+    """
+    if not context.messages:
+        raise ValueError("不能继续：上下文没有消息")
+    if isinstance(context.messages[-1], AssistantMessage):
+        raise ValueError("不能从助手消息继续；请先处理失败消息或追加新输入")
+    return await run_agent_loop([], context, config, emit, stream_fn, cancellation)
 
 
 async def _run_turns(
@@ -271,8 +292,49 @@ async def _run_turns(
     4. 判断是继续下一轮，还是结束。
     """
 
+    # 这两个变量跨轮保存。Python 的 while 不创建新的局部作用域。
+    last_turn: TurnContext | None = None
+    pending = config.get_steering_messages() if config.get_steering_messages else []
     while True:
+        current.metadata["turn"] = turn_no
         # 每轮开始前先看取消。已经取消就不再发起新的模型请求，避免浪费。
+        if token.cancelled:
+            return "cancelled", None, turn_no
+
+        prepared: list[Message] = []
+        if last_turn is not None:
+            # prepare_next_turn 只在确定需要下一轮时调用，不会在首轮调用。
+            # 可在这里做耗时的压缩或更新模型，完成后才发下一轮开始事件。
+            update = await config.prepare_next_turn(last_turn) if config.prepare_next_turn else None
+            if update is not None:
+                _install_context(current, update.context)
+                config = replace(config, model=update.model if update.model is not None else config.model)
+                prepared = update.messages
+            # 压缩期间也可能来了新指令；one-at-a-time 模式每轮最多取一次非空批次。
+            if not pending and config.get_steering_messages is not None:
+                pending = config.get_steering_messages()
+            if token.cancelled:
+                return "cancelled", None, turn_no
+            await emit(TurnStart(turn=turn_no))
+
+        for message in [*prepared, *pending]:
+            current.messages.append(message)
+            new_messages.append(message)
+            await emit(MessageStart(message=message, turn=turn_no))
+            await emit(MessageEnd(message=message, turn=turn_no))
+        pending = []
+
+        # prepare_request 每次都执行，包括首轮；transform_context 则仍在模型边界
+        # 内只整理本轮消息。运行状态替换和消息清洗因此各有一个清楚的位置。
+        if config.prepare_request is not None:
+            request_update = await config.prepare_request(RequestContext(current, config.model, token))
+            if request_update is not None:
+                _install_context(current, request_update.context)
+                config = replace(
+                    config,
+                    model=request_update.model if request_update.model is not None else config.model,
+                )
+        current.metadata["turn"] = turn_no
         if token.cancelled:
             return "cancelled", None, turn_no
 
@@ -337,33 +399,46 @@ async def _run_turns(
             new_messages=new_messages,
         )
         decision = await _call_finish_turn(config, turn_context)
+        last_turn = turn_context
         await emit(TurnEnd(turn=turn_no, message=assistant_message, tool_results=batch.messages))
 
         # finish_turn 明确要求结束，就不再管后面有没有工具调用。
         if decision is not None and decision.action == "end":
             return "completed", None, turn_no
 
-        # 没有工具调用时，模型通常是在给最终回答。除非 finish_turn 明确要求继续，
-        # 否则本轮就是正常结束。
+        # 参考 Pi 的两个队列：steering 可在有工具的轮次之间介入；follow-up
+        # 等到原调查自然停下时才取。它们只在安全点追加，不改正在流出的回复。
         wants_continue = decision is not None and decision.action == "continue"
-        if not tool_calls and not wants_continue:
-            return "completed", None, turn_no
-
-        # 所有工具结果都要求终止时，循环也结束。
-        # 例子：某个“提交最终报告”的工具返回 terminate=True，模型不需要再说话。
-        if batch.terminate:
-            return "completed", None, turn_no
-
-        # 工具执行过程中用户取消，本轮结束后停止。
+        pending = config.get_steering_messages() if config.get_steering_messages else []
+        natural_continue = bool(tool_calls) and not batch.terminate
+        if not natural_continue and not pending and config.get_follow_up_messages:
+            pending = config.get_follow_up_messages()
         if token.cancelled:
             return "cancelled", None, turn_no
+        if not natural_continue and not pending and not wants_continue:
+            return "completed", None, turn_no
 
         # 4) 进入下一轮。先检查轮数上限，避免发出一个实际上不会执行的 turn_start。
         # 例子：max_turns=2，第 2 轮工具执行完后这里就返回 max_turns，不会再发 turn_start(3)。
         if turn_no >= config.max_turns:
             return "max_turns", f"达到最大轮数 {config.max_turns}", turn_no
         turn_no += 1
-        await emit(TurnStart(turn=turn_no))
+
+
+def _install_context(current: AgentContext, replacement: AgentContext | None) -> None:
+    """安装 Hook 返回的新状态，但保留入口持有的 context 外壳和 metadata 引用。
+
+    Python 参数是对象引用。若只在 _run_turns 里写 current = replacement，
+    外层 run_agent_loop 的 current 仍是旧对象，最后返回的历史就会丢失。
+    因此这里替换字段；metadata 先复制再清空，兼容两个对象共用同一字典的情况。
+    """
+    if replacement is None or replacement is current:
+        return
+    metadata = dict(replacement.metadata)
+    current.messages = list(replacement.messages)
+    current.tools = list(replacement.tools)
+    current.metadata.clear()
+    current.metadata.update(metadata)
 
 
 async def _stream_assistant_response(
@@ -425,7 +500,7 @@ async def _stream_assistant_response(
         cancellation=token,
         # 复制一份 metadata，避免模型适配器或记录器无意中改到循环内部状态。
         # 例子：`context_budget` 描述本轮上下文用了多少字符，记录器只读它。
-        metadata=dict(current.metadata),
+        metadata={**current.metadata, "turn": turn_no, "purpose": "conversation"},
     )
 
     # 记录 partial：Pi 的流式事件每一帧都带“到目前为止的完整消息”，
@@ -490,6 +565,11 @@ async def _stream_assistant_response(
             turn_no=turn_no,
             message=f"模型流读取失败：{exc}",
         )
+    finally:
+        # done/error 分支提前 return 也会执行 finally，逐层关闭 Retry/Recorder/模型流。
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            await close()
 
     # 流结束但既没有 done 也没有 error：按错误处理，避免循环拿着半截消息继续跑。
     return await _append_stream_error(

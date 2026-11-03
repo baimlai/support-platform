@@ -216,3 +216,11 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 .claude
+
+# 拉取的上游参考源码保留在本地；提交固定版本清单和对照说明即可。
+outputs/pi-upstream-*/
+
+# 保留一份 query 教学样例；CLI/HTTP 重复运行日志和本地任务库不提交。
+outputs/cli-pi-v1.5.0/
+outputs/http-query-walkthrough/runs/
+outputs/http-query-walkthrough/tasks.db*

@@ -63,6 +63,8 @@ from app.harness.skills import (
 from app.harness.tool_search import PLATFORM_TOOL_DECLARATIONS
 from app.mcp.dba_tools import business_tool_declarations
 from app.runtime.contracts import AgentEvent, CancellationToken, TurnStart
+from app.runtime.pi_reference.compaction import CompactionSettings
+from app.runtime.pi_reference.retry import RetryPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -413,6 +415,12 @@ class TaskService:
             model_timeout_s=self.settings.model_timeout_s,
             model_max_tokens=self.settings.model_max_tokens,
             model_temperature=self.settings.model_temperature,
+            retry_policy=RetryPolicy(max_retries=self.settings.model_retries),
+            compaction=CompactionSettings(
+                enabled=self.settings.compaction_enabled,
+                trigger_chars=self.settings.compaction_trigger_chars,
+                keep_recent_messages=self.settings.compaction_keep_messages,
+            ),
             # 每张工单使用自己的场景数据集；旧工单没有 scenario_mode 时，
             # 这里返回服务端配置的默认慢 SQL 数据集，行为保持不变。
             dataset_path=resolve_ticket_dataset(
@@ -711,6 +719,7 @@ class TaskService:
         if not path.exists():
             raise TurnContextNotFound(f"任务还没有模型请求记录：turn={turn}")
 
+        attempts: list[dict[str, Any]] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
@@ -718,8 +727,16 @@ class TaskService:
                 data = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if int(data.get("request_seq", 0)) != turn:
+            metadata = data.get("metadata") or {}
+            # request_seq 是所有模型请求的流水号，重试/摘要也占号，不能再当轮次用。
+            # 旧运行记录没有 turn/purpose，仍按旧 request_seq 规则读取。
+            if metadata.get("purpose", "conversation") != "conversation":
                 continue
+            if int(metadata.get("turn", data.get("request_seq", 0))) != turn:
+                continue
+            attempts.append(data)
+        if attempts:
+            data = attempts[-1]
             metadata = data.get("metadata") or {}
             return {
                 "task_id": task_id,
@@ -729,6 +746,10 @@ class TaskService:
                 "messages": data.get("messages") or [],
                 "tools": data.get("tools") or [],
                 "budget": metadata.get("context_budget"),
+                # 只列每次尝试的编号，不把重复大上下文一次全塞给浏览器。
+                "attempt_request_seqs": [item["request_seq"] for item in attempts],
+                "retry_attempt": metadata.get("retry_attempt", 0),
+                "compaction": metadata.get("compaction"),
             }
         raise TurnContextNotFound(f"第 {turn} 轮还没有模型请求记录")
 

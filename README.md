@@ -162,7 +162,7 @@ cat var/runs/<run_id>/mcp_protocol.jsonl
 
 - **慢 SQL Skill**：`skills/slow-sql/SKILL.md` 说明适用场景、要收集的证据、排查分支、
   结束条件和输出要求；`skill.json` 声明初始只开放 `slow_log_query`。
-- **关键词工具搜索**：模型调用平台工具 `search_tools`，命中后把工具加入**后续轮次**。
+- **工具搜索（分字段 BM25 + DBA 别名）**：模型调用平台工具 `search_tools`，命中后把工具加入**后续轮次**。
   搜索不授予权限，未加载的工具即使被模型猜中名字也无法执行。
 - **原始证据落盘**：工具结果超过 `max_inline_chars` 时保存为 `evidence/ev-xxxxxx.json`，
   模型只收到截断预览和证据编号；需要全文时用 `evidence_read(evidence_id, offset, limit)`
@@ -208,7 +208,7 @@ slow_log_query（大结果落盘 ev-000001）
   已用 `deepseek-flash` 实机跑通一张 5 轮、4 条证据的完整任务。
   前端工作台的“模型来源 / 模型”下拉框已联调：页面分别创建过 `mock` 和
   `deepseek` 任务，终态快照都记录了实际模型。
-- **测试**：65 个用例，覆盖完整流程、自由文本、取消幂等、SSE、错误码、重启恢复、
+- **测试**：87 个用例，覆盖完整流程、自由文本、取消幂等、SSE、错误码、重启恢复、
   模型目录/选择、SQLite 迁移、DeepSeek 适配器的 SSE/工具调用/错误翻译、
   官方 SDK 和 Pi 风格客户端的 MCP 协议/结果对比，以及十个 Mock 场景的
   数据契约、路径安全和端到端报告断言。
@@ -321,7 +321,7 @@ outputs/
 ## Pi 来源
 
 - 源项目：https://github.com/earendil-works/pi
-- 参考提交：`babe30a7e6c185346c85859da30b58183e5964f0`（2026-10-29）
+- 参考提交：`f9a26365568127461c47a07a37dcb42c140a3ac5`（Pi v1.5.0，2026-11-02）
 - 许可证：MIT，Copyright (c) 2025 Mario Zechner
 - 详见：`app/runtime/pi_reference/NOTICE.md`、`docs/pi-mapping.md`
 
@@ -333,3 +333,30 @@ outputs/
 1. 任务列表/历史分页与筛选，方便回看已经运行过的任务。
 2. 联调中发现字段不一致，先更新 `outputs/进度与联调.md` 和样例，再改代码。
 3. 任务书之外的后续项：鉴权、真实只读数据源接入。
+
+## Pi v1.5.0 教学扩展与 query 导读
+
+已接入 Agent 包装层、steering/follow-up、请求准备 Hook、BM25 工具排名、模型临时错误重试、
+可选历史摘要与 UTF-8/行数预览控量。保留完整历史和证据，摘要/请求视图单独管理。
+仍为选择性移植，参数校验沿用 Python jsonschema，不复制 pi-schema 编译器。
+
+```bash
+# 跑包含运行中补充与结束后追问的 7 轮样例；所有模型和业务数据仍为 mock
+uv run python -m app.walkthrough --output outputs/query-walkthrough
+
+# 普通工单启用摘要；mock 为标注清楚的摘录，真实模型为无工具权限的摘要请求
+uv run python -m app.cli run --compact --compact-trigger 4000 --compact-keep 2
+
+# 检查函数是否改名/移动，并刷新教学索引的行号
+uv run python scripts/check_call_chain.py
+```
+
+API 新增环境变量：`SUPPORT_PLATFORM_MODEL_RETRIES`（默认 2）、
+`SUPPORT_PLATFORM_COMPACTION_ENABLED`（默认 0，设 1 开启）、
+`SUPPORT_PLATFORM_COMPACTION_TRIGGER`（默认 10000 字符估算）、
+`SUPPORT_PLATFORM_COMPACTION_KEEP`（默认保留至少 4 条近期消息，按完整工具块处理）。
+
+导读：[完整 query 调用链与模块职责](outputs/ARCHITECTURE.md)、
+[多轮时序图](outputs/ARCHITECTURE_DIAGRAMS.md)、
+[带源文件行号的函数索引](outputs/QUERY_CALL_CHAIN.md)。
+HTTP 仍是一张工单一次调查；示例中的用户补充/追问通过内核 Agent API 演示，未新增前端续聊接口。

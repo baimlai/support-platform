@@ -1,0 +1,296 @@
+{
+  "mock": true,
+  "query": "订单查询从 10 点开始变慢，请调查原因，说明证据和验证步骤。",
+  "status": "completed",
+  "turns": 7,
+  "run_dir": "outputs/query-walkthrough/20261103-163007-TCK-20261029-001-a761",
+  "timeline": [
+    {
+      "kind": "user_message",
+      "turn": 1,
+      "text": "下面是待处理的工单（mock=true，数据仅用于流程验证）：\n\n<BEGIN_TICKET_JSON>\n{\n  \"mock\": true,\n  \"ticket_id\": \"TCK-20261029-001\",\n  \"tenant_id\": \"tenant-demo\",\n  \"title\": \"订单查询从今天 10 点开始明显变慢\",\n  \"description\": \"订单查询从 10 点开始变慢，请调查原因，说明证据和验证步骤。\",\n  \"instance_id\": \"db-mysql-001\",\n  \"database\": \"shop_order\",\n  \"database_type\": \"mysql\",\n  \"scenario_id\": \"mysql-slow-sql-001\",\n  \"scenario_label\": \"MySQL 慢查询缺少联合索引导致订单列表超时\",\n  \"scenario_order\": 10,\n  \"skill\": \"slow-sql\",\n  \"time_range\": {\n    \"start\": \"2026-10-29T10:00:00+08:00\",\n    \"end\": \"2026-10-29T11:00:00+08:00\"\n  },\n  \"symptom\": \"订单列表查询变慢，部分请求超时\",\n  \"mock_note\": \"此工单和后续工具数据均为模拟，仅用于验证 Agent 流程，不代表真实客户、实例或业务事实。\",\n  \"source\": \"walkthrough_query\"\n}\n<END_TICKET_JSON>\n\n请按当前 Skill 的调查方法开始调查：先确认实例、SQL 指纹和时间范围，再调用工具取证。\n需要其它工具时先用 search_tools 搜索。如果某个工具失败或无数据，\n请在结论中明确标注为“未验证”，不要解释为“没有异常”。\n最后严格按系统提示要求的章节输出：先给 `## 结论`（唯一主根因 + 置信度 + 直接证据 +\n结论边界），再给 `## 修复建议`；只有证据不足时才在结论里列最多 3 个候选，\n未验证项放进 `## 已排除与待验证`，不要把所有假设平铺成候选清单。\n"
+    },
+    {
+      "kind": "tool_result",
+      "turn": 1,
+      "tool": "slow_log_query",
+      "is_error": false,
+      "evidence": "ev-000001"
+    },
+    {
+      "kind": "user_message",
+      "turn": 2,
+      "text": "补充：工具失败和无数据要单独说明，保留证据编号。"
+    },
+    {
+      "kind": "tool_result",
+      "turn": 2,
+      "tool": "evidence_read",
+      "is_error": false,
+      "evidence": null
+    },
+    {
+      "phase": "completed",
+      "summarized_messages": 5,
+      "summary_chars": 334,
+      "error": null,
+      "turn": 3,
+      "type": "context_compacted"
+    },
+    {
+      "kind": "tool_result",
+      "turn": 3,
+      "tool": "search_tools",
+      "is_error": false,
+      "evidence": null
+    },
+    {
+      "phase": "completed",
+      "summarized_messages": 7,
+      "summary_chars": 631,
+      "error": null,
+      "turn": 4,
+      "type": "context_compacted"
+    },
+    {
+      "kind": "tool_result",
+      "turn": 4,
+      "tool": "execution_plan",
+      "is_error": false,
+      "evidence": "ev-000002"
+    },
+    {
+      "phase": "completed",
+      "summarized_messages": 9,
+      "summary_chars": 915,
+      "error": null,
+      "turn": 5,
+      "type": "context_compacted"
+    },
+    {
+      "kind": "tool_result",
+      "turn": 5,
+      "tool": "instance_metrics",
+      "is_error": true,
+      "evidence": "ev-000003"
+    },
+    {
+      "kind": "tool_result",
+      "turn": 5,
+      "tool": "lock_wait_query",
+      "is_error": false,
+      "evidence": "ev-000004"
+    },
+    {
+      "phase": "completed",
+      "summarized_messages": 11,
+      "summary_chars": 1207,
+      "error": null,
+      "turn": 6,
+      "type": "context_compacted"
+    },
+    {
+      "kind": "user_message",
+      "turn": 7,
+      "text": "追问：请再给我一份验证步骤。"
+    },
+    {
+      "phase": "completed",
+      "summarized_messages": 14,
+      "summary_chars": 1597,
+      "error": null,
+      "turn": 7,
+      "type": "context_compacted"
+    }
+  ],
+  "model_requests": [
+    {
+      "request_seq": 1,
+      "turn": 1,
+      "purpose": "conversation",
+      "tools": [
+        "slow_log_query",
+        "search_tools",
+        "evidence_read"
+      ],
+      "budget": {
+        "max_chars": 12000,
+        "used_chars": 4926,
+        "source_messages": 2,
+        "included_messages": 3,
+        "included_recent_messages": 0,
+        "dropped_messages": 0,
+        "dropped_blocks": 0,
+        "stubbed_tool_results": 0,
+        "max_recent_messages": 10,
+        "max_tool_result_chars": 1200,
+        "max_topic_chars": 4000,
+        "over_budget": false,
+        "note": "字符估算，不是 token 精确计数；system、工单和 Topic 固定包含；工具调用和工具结果按块保留，不会只留一半。"
+      }
+    },
+    {
+      "request_seq": 2,
+      "turn": 2,
+      "purpose": "conversation",
+      "tools": [
+        "slow_log_query",
+        "search_tools",
+        "evidence_read"
+      ],
+      "budget": {
+        "max_chars": 12000,
+        "used_chars": 8890,
+        "source_messages": 5,
+        "included_messages": 6,
+        "included_recent_messages": 3,
+        "dropped_messages": 0,
+        "dropped_blocks": 0,
+        "stubbed_tool_results": 1,
+        "max_recent_messages": 10,
+        "max_tool_result_chars": 1200,
+        "max_topic_chars": 4000,
+        "over_budget": false,
+        "note": "字符估算，不是 token 精确计数；system、工单和 Topic 固定包含；工具调用和工具结果按块保留，不会只留一半。"
+      }
+    },
+    {
+      "request_seq": 3,
+      "turn": 3,
+      "purpose": "conversation",
+      "tools": [
+        "slow_log_query",
+        "search_tools",
+        "evidence_read"
+      ],
+      "budget": {
+        "max_chars": 12000,
+        "used_chars": 8735,
+        "source_messages": 5,
+        "included_messages": 6,
+        "included_recent_messages": 2,
+        "dropped_messages": 0,
+        "dropped_blocks": 0,
+        "stubbed_tool_results": 0,
+        "max_recent_messages": 10,
+        "max_tool_result_chars": 1200,
+        "max_topic_chars": 4000,
+        "over_budget": false,
+        "note": "字符估算，不是 token 精确计数；system、工单和 Topic 固定包含；工具调用和工具结果按块保留，不会只留一半。"
+      }
+    },
+    {
+      "request_seq": 4,
+      "turn": 4,
+      "purpose": "conversation",
+      "tools": [
+        "slow_log_query",
+        "search_tools",
+        "evidence_read",
+        "execution_plan",
+        "instance_metrics",
+        "lock_wait_query"
+      ],
+      "budget": {
+        "max_chars": 12000,
+        "used_chars": 9381,
+        "source_messages": 5,
+        "included_messages": 6,
+        "included_recent_messages": 2,
+        "dropped_messages": 0,
+        "dropped_blocks": 0,
+        "stubbed_tool_results": 1,
+        "max_recent_messages": 10,
+        "max_tool_result_chars": 1200,
+        "max_topic_chars": 4000,
+        "over_budget": false,
+        "note": "字符估算，不是 token 精确计数；system、工单和 Topic 固定包含；工具调用和工具结果按块保留，不会只留一半。"
+      }
+    },
+    {
+      "request_seq": 5,
+      "turn": 5,
+      "purpose": "conversation",
+      "tools": [
+        "slow_log_query",
+        "search_tools",
+        "evidence_read",
+        "execution_plan",
+        "instance_metrics",
+        "lock_wait_query"
+      ],
+      "budget": {
+        "max_chars": 12000,
+        "used_chars": 9837,
+        "source_messages": 5,
+        "included_messages": 6,
+        "included_recent_messages": 2,
+        "dropped_messages": 0,
+        "dropped_blocks": 0,
+        "stubbed_tool_results": 0,
+        "max_recent_messages": 10,
+        "max_tool_result_chars": 1200,
+        "max_topic_chars": 4000,
+        "over_budget": false,
+        "note": "字符估算，不是 token 精确计数；system、工单和 Topic 固定包含；工具调用和工具结果按块保留，不会只留一半。"
+      }
+    },
+    {
+      "request_seq": 6,
+      "turn": 6,
+      "purpose": "conversation",
+      "tools": [
+        "slow_log_query",
+        "search_tools",
+        "evidence_read",
+        "execution_plan",
+        "instance_metrics",
+        "lock_wait_query"
+      ],
+      "budget": {
+        "max_chars": 12000,
+        "used_chars": 11243,
+        "source_messages": 6,
+        "included_messages": 7,
+        "included_recent_messages": 3,
+        "dropped_messages": 0,
+        "dropped_blocks": 0,
+        "stubbed_tool_results": 0,
+        "max_recent_messages": 10,
+        "max_tool_result_chars": 1200,
+        "max_topic_chars": 4000,
+        "over_budget": false,
+        "note": "字符估算，不是 token 精确计数；system、工单和 Topic 固定包含；工具调用和工具结果按块保留，不会只留一半。"
+      }
+    },
+    {
+      "request_seq": 7,
+      "turn": 7,
+      "purpose": "conversation",
+      "tools": [
+        "slow_log_query",
+        "search_tools",
+        "evidence_read",
+        "execution_plan",
+        "instance_metrics",
+        "lock_wait_query"
+      ],
+      "budget": {
+        "max_chars": 12000,
+        "used_chars": 9883,
+        "source_messages": 5,
+        "included_messages": 5,
+        "included_recent_messages": 1,
+        "dropped_messages": 1,
+        "dropped_blocks": 1,
+        "stubbed_tool_results": 0,
+        "max_recent_messages": 10,
+        "max_tool_result_chars": 1200,
+        "max_topic_chars": 4000,
+        "over_budget": false,
+        "note": "字符估算，不是 token 精确计数；system、工单和 Topic 固定包含；工具调用和工具结果按块保留，不会只留一半。"
+      }
+    }
+  ],
+  "note": "同一次调用中的多轮取证，加 steering 和 follow-up；不是 HTTP 跨任务续聊或重启恢复。"
+}

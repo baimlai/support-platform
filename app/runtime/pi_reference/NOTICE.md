@@ -3,7 +3,7 @@
 本目录下的 Python 循环是对 Pi Agent 的选择性移植，不是 Pi 官方 Python SDK。
 
 - 源项目：https://github.com/earendil-works/pi
-- 参考提交：`babe30a7e6c185346c85859da30b58183e5964f0`（2026-10-29）
+- 参考提交：`f9a26365568127461c47a07a37dcb42c140a3ac5`（Pi v1.5.0，2026-11-02）
 - 主要参考文件：
   - `packages/agent/src/agent-loop.ts`
   - `packages/agent/src/types.ts`
@@ -12,6 +12,14 @@
   - `packages/ai/src/utils/transcript.ts`
   - `packages/ai/src/utils/event-stream.ts`
   - `packages/ai/src/utils/validation.ts`
+  - `packages/ai/src/utils/retry.ts`、`provider-retry.ts`、`overflow.ts`
+  - `packages/durable/src/search.ts`
+  - `packages/coding-agent/src/core/compaction/compaction.ts`
+  - `packages/coding-agent/src/core/tools/truncate.ts`
+
+原始基线是 `babe30a7e6c185346c85859da30b58183e5964f0`。
+两个提交的 agent-loop.ts 与 agent.ts 相同；本次补齐部分原先省略的能力。
+仍是选择性移植，不代表实现了上游全部 API。
 
 Pi 使用 MIT 许可证。下面的许可证文本随移植代码一起保留：
 

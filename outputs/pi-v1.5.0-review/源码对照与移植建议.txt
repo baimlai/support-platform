@@ -1,0 +1,226 @@
+Pi v1.5.0 源码对照与移植建议
+核对日期：2026-11-03
+
+一、这次做了什么
+
+已从官方仓库拉取并检出 v1.5.0，源码在：
+  outputs/pi-upstream-v1.5.0/
+没有安装或执行上游 npm 包，没有改变本项目 app/runtime 的实现、参考版本或许可证说明。
+
+官方仓库：https://github.com/earendil-works/pi
+发布页面：https://github.com/earendil-works/pi/releases/tag/v1.5.0
+v1.5.0 固定提交：f9a26365568127461c47a07a37dcb42c140a3ac5
+本项目现有参考提交：babe30a7e6c185346c85859da30b58183e5964f0
+现有参考提交的 Git 描述：v1.4.0-198-gbabe30a7
+
+注意：现有参考提交不是纯 v1.4.0 标签，而是其后的开发提交。
+所以“v1.5.0 相对 v1.4.0 的发布说明”不能直接当成“相对本项目参考提交的差异”。
+
+比较方法：读取上游源码，以两个提交的 Git blob ID 判断文件内容是否逐字节相同；
+再阅读有变化的补丁及本项目对应代码。manifest.json 记录逐文件结果，
+runtime-and-utils.diff 保存所选文件的实际差异。
+
+二、最重要的结论：低层 Loop 没有变化
+
+以下上游文件在两个提交中内容完全相同：
+  packages/agent/src/agent-loop.ts
+  packages/agent/src/agent.ts
+
+agent-loop.ts 的两版 blob ID 都是：
+  cfc9401e5581847f6d5a9bb1815ab0f0e663f2e5
+
+因此，我们刚解读的 run_agent_loop、_run_turns、_stream_assistant_response 等
+对应的上游循环主干，并没有因为 v1.5.0 发布而发生需要追补的新修改。
+
+以下候选模块也与旧参考提交相同：
+  ai/src/utils/streaming-json.ts
+  ai/src/utils/json-parse.ts
+  ai/src/utils/provider-retry.ts
+  ai/src/utils/overflow.ts
+  coding-agent/src/core/compaction/compaction.ts
+  coding-agent/src/core/tools/truncate.ts
+  durable/src/harness/compaction.ts
+上述路径均相对于 packages/。
+
+“相同”指上游两个版本相同，不代表本项目已经完整翻译了这些文件。
+当前项目是有明确删减和平台扩展的选择性 Python 移植；并非整个 Pi 内核 API 一比一齐全。
+docs/pi-mapping.md 已记录大部分差异。
+
+三、这段时间确实改变了什么
+
+1. 工具参数校验换成 pi-schema
+
+源码：packages/ai/src/utils/validation.ts、packages/schema/。
+工具参数类型也调整了 packages/agent/src/types.ts、packages/ai/src/types.ts。
+
+现在 TypeBox 和普通 JSON Schema 统一经过 pi-schema 校验并做类型转换。
+例如数字字段的字符串 "42" 可转换为数字，数组字段可把单值包装成数组；
+校验错误以字段路径列出，并按 schema 对象缓存已编译校验器。
+这是行为变化，既涉及“校验”，也涉及“参数被改成了什么”。
+
+本项目对应位置：
+  app/runtime/pi_reference/loop.py::_validate_tool_arguments
+当前使用 jsonschema 校验和 deepcopy，不做这类转换。
+因此本项目不受 npm/TypeBox 依赖升级影响，但与新版 Pi 的参数转换行为仍不同。
+
+建议：先单独定义需要跟随的转换规则并增加对照用例，再决定是否启用。
+保留成熟 Python JSON Schema 库，移植调用流程和错误格式即可；
+无需把 pi-schema 的编译器、格式库、TypeScript 类型推导整套翻译成 Python。
+例如实例 ID 本来就是字符串，不能全局把看起来像数字的字符串都转成数字。
+
+2. 工具搜索和中文分词
+
+源码：packages/durable/src/search.ts、src/tool-search/tool-search.ts。
+搜索工具按“精确名称匹配、查询词覆盖数量、加权 BM25 得分”排序，
+工具名、描述/参数、namespace 分开计分，长 namespace 说明不再拖低工具排名。
+支持标识符拆词、英文单复数处理和 Unicode 词分割。
+durable 的排名实现在这段时间追齐 coding-agent，并补上 Unicode 分词。
+
+本项目对应位置：app/harness/tool_search.py::search_tool_specs。
+当前是简单关键词加分和中文别名展开，适合小目录。
+工具增加后，这个纯排序模块很适合独立移植；保留我们已有的 DBA 中文别名。
+JavaScript Intl.Segmenter 没有可直接照抄的 Python 标准库等价实现，
+中文分词需要明确选择实现，并用中文查询做等价性验证。
+
+3. 重试错误分类补充
+
+源码：packages/ai/src/utils/retry.ts。
+相对旧参考提交，增加识别智谱/Z.ai 的 1308 额度错误：虽然可能以 HTTP 429 返回，
+它不是几秒后就能恢复的临时限流，不应进入短时间自动重试。
+重试模块大部分逻辑此前就存在，本项目尚未移植。
+
+4. durable 上下文读模型调整
+
+源码：packages/durable/src/harness/context.ts。
+支持固定上下文范围、复用已有范围并增量读取新提交的 entries，
+从持久化记录导出模型视图时处理编辑、失败消息和工具结果顺序。
+该层依赖 durable 的 Session、Storage、Entry 和提交模型。
+适合借鉴“完整记录与模型视图分离”的原则，当前不建议直接搬入我们的文件记录结构。
+
+四、值得继续移植的模块
+
+A. 上下文压缩：最贴合我们刚讨论的问题
+
+优先参考：packages/coding-agent/src/core/compaction/compaction.ts。
+关键函数：estimateContextTokens、shouldCompact、findCutPoint、prepareCompaction、
+generateSummaryWithUsage、compact、getSummarizationFailure。
+
+可借鉴的流程：
+  检查上下文预算 → 找到安全切分点 → 总结旧段 → 保留近期原文 → 保存摘要及保留边界。
+多次压缩时把已有摘要纳入后续摘要；工具调用和结果不能被切开。
+摘要生成失败或达到输出长度限制时，不把半截摘要提交为有效检查点。
+
+本项目落点建议：app/harness/ 下新增独立压缩策略，由现有 transform_context
+钩子使用；若采用有持久化状态变更的压缩，也可在后续轮次准备钩子中执行。
+保持 Loop 不依赖 Topic 表或 DBA 工单字段。
+
+需要适配的部分：原文件依赖 SessionEntry、SessionProjection、coding-agent 的
+文件操作追踪和自定义消息，不能只复制一个函数就直接运行。
+DBA 摘要应保留实例/时间范围、事实与证据引用、候选原因、失败/无数据、未决事项。
+Topic 继续保存结构化调查状态；不能因为有自然语言摘要就取消 Topic。
+模型 usage 还没接入时，token 估算必须明确标成估算，不能伪装成精确用量。
+
+B. 工具发现排名：改动范围小、收益直接
+
+参考：packages/durable/src/search.ts、src/tool-search/tool-search.ts。
+移植 rankDocuments 的评分与排序逻辑，连接现有 ToolSession 即可，
+无需把 durable 的 control.addTools 和持久化框架一起搬来。
+
+建议验收：精确工具名优先；覆盖更多查询词者优先；描述反复出现某词不能压过名称；
+长说明不损害排名；中文“执行计划/锁等待”等查询仍命中；搜索不自动授予权限。
+
+C. 模型重试与上下文溢出分类
+
+参考：packages/ai/src/utils/retry.ts、provider-retry.ts、overflow.ts。
+可以移植暂时错误分类、有上限的指数退避、可取消等待、重试事件和溢出识别。
+建议落在 app/adapters/ 的模型调用层或独立运行策略中，避免 DBA 业务规则进入内核。
+
+需要区分：
+  临时网络错误/服务忙 → 有限重试。
+  额度耗尽/认证失败 → 返回明确错误。
+  上下文过长 → 先缩小或压缩上下文，再尝试，不能原样盲重试。
+  已取消 → 立即结束，不能继续等待重试。
+
+重试的是模型请求，不是重新执行已完成的业务工具。
+流已经部分输出后还需正确处理失败助手消息、请求记录及新的尝试，
+不能直接在整个 run_agent_loop 外面包一个重跑循环。
+
+D. Agent 包装类与运行准备 Hook：更接近完整内核接口
+
+参考：packages/agent/src/agent.ts、agent-loop.ts、types.ts。
+当前已有底层 Loop、emit、取消和 TaskService；上游 Agent 类还有：
+  prompt / continue / abort / subscribe。
+  steering 队列：运行过程中补充或纠正指令，在安全点送入上下文。
+  follow-up 队列：本轮调查自然结束前检查后续输入。
+  prepareRequest：每次模型请求前执行，含第一次。
+  prepareNextTurn：一轮结束且确定继续后，在下一轮开始前执行。
+
+transform_context 负责本轮消息视图；prepareRequest/prepareNextTurn 还可以替换
+运行上下文、模型和思考等级，这些是不同职责。
+它们在旧参考提交中已存在，并非 v1.5.0 新增。
+
+如果要让前端运行中补充“实例改为 B”“先看锁”，这组能力值得移植。
+可在 app/runtime/pi_reference/ 增加薄 Agent 包装层；TaskService 仍管理 HTTP
+后台任务和落盘，避免维护两套互相冲突的业务状态。
+continue 是继续已有上下文的接口，不等于自动具备进程重启后精确续跑能力。
+
+E. 工具输出截断
+
+参考：packages/coding-agent/src/core/tools/truncate.ts。
+支持独立的行数/UTF-8 字节上限、保留头部或尾部、完整行边界和清晰的截断元信息。
+适合为 app/harness/evidence.py 增加文本日志预览策略。
+原始证据仍完整保存，保留现有 evidence_id；字符预算与字节预算要分别标清。
+超长单行、中文多字节、空内容、尾部日志都值得验证。
+
+F. 消息/工具状态和用量契约
+
+参考：packages/ai/src/types.ts、utils/transcript.ts，以及 agent/src/types.ts。
+可按需求补充工具参数解析错误 argumentsError、结构化结果 structuredContent、
+模型真实 usage、工具声明变化 toolsAdded/toolsRemoved 等。
+这能改进多工具调用的错误隔离、MCP 结构化结果保存、模型费用观察及记录回放。
+当前模型适配器遇到坏参数会使这一轮返回错误；若引入单工具参数错误字段，
+需同步修改适配器、校验器、事件契约及测试，不能只加一个 dataclass 字段。
+新增协议字段时同步前端和 docs/pi-mapping.md；模拟模型不能虚构真实计费数字。
+
+五、当前不建议整体移植的部分
+
+pi-schema 全套编译器和 TypeScript 静态类型层：复用 Python 库更合适。
+pi-durable 整套：官方 README 标为 Experimental，依赖 Chord/提交调度/重放语义，
+且本项目任务书目前不要求进程重启后精确续跑。
+codemode：需要代码执行边界、超时、结果控量和审计适配，当前工具量不足以证明收益。
+TUI、终端编辑器、扩展市场、自更新和编码专用文件工具：与 DBA 工作台当前需求距离较远。
+
+并行工具执行可以以后按需要补充：上游早已支持，当前有意只做顺序执行。
+移植时需区分“执行完成事件按完成时间发出”与“工具结果按模型调用顺序写回历史”，
+并加并发上限，不能简单 gather 后忽略钩子顺序和取消语义。
+
+六、建议的实施顺序
+
+先保留当前可运行内核和固定参考提交；完成源码对照后，再做范围明确的移植。
+
+按当前 DBA 场景的收益排序：
+  1. 工具搜索排名，以及模型重试/溢出识别。
+  2. 有持久化摘要边界的上下文压缩，与 Topic 配合。
+  3. 需要运行中交互时，再补 Agent 包装层、队列和准备 Hook。
+  4. 输出截断和消息/usage 契约按真实接入需要逐项补充。
+
+若优先目标是学习“完整 Pi 内核”，可把第 3 项提前，先补齐运行控制接口。
+所有移植继续保留来源/许可、教学型中文注释及行为对照测试；
+更新参考提交必须代表实际核对并实现过的状态，不能只把 NOTICE 的版本号改成 1.5.0。
+
+七、核对范围与限制
+
+本次是源码调查，没有修改运行时代码，因此没有运行应用测试或真实模型调查。
+没有把整个上游仓库的所有模块都审查一遍；重点覆盖 Loop、类型/参数校验、
+上下文与压缩、重试、工具搜索和输出截断，并抽查现有适配器/工具会话。
+manifest.json 可核验固定提交及逐文件差异，补丁用于复查所选改动。
+
+关键源码入口（均固定到 v1.5.0，不使用浮动 main）：
+  https://github.com/earendil-works/pi/blob/v1.5.0/packages/agent/src/agent-loop.ts
+  https://github.com/earendil-works/pi/blob/v1.5.0/packages/agent/src/agent.ts
+  https://github.com/earendil-works/pi/blob/v1.5.0/packages/ai/src/utils/validation.ts
+  https://github.com/earendil-works/pi/blob/v1.5.0/packages/durable/src/search.ts
+  https://github.com/earendil-works/pi/blob/v1.5.0/packages/coding-agent/src/core/compaction/compaction.ts
+  https://github.com/earendil-works/pi/blob/v1.5.0/packages/ai/src/utils/retry.ts
+  https://github.com/earendil-works/pi/blob/v1.5.0/packages/ai/src/utils/overflow.ts
+  https://github.com/earendil-works/pi/blob/v1.5.0/packages/coding-agent/src/core/tools/truncate.ts

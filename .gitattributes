@@ -1,0 +1,2 @@
+# 上游补丁保留原始上下文空格和 Tab，不按项目新增源码的空白规则检查。
+outputs/pi-v1.5.0-review/*.diff -whitespace

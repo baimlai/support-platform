@@ -1,0 +1,939 @@
+diff --git a/packages/agent/src/types.ts b/packages/agent/src/types.ts
+index dbfba74a..24bdd753 100644
+--- a/packages/agent/src/types.ts
++++ b/packages/agent/src/types.ts
+@@ -14,7 +14,7 @@ import type {
+ 	TranscriptContext,
+ 	Usage,
+ } from "@earendil-works/pi-ai";
+-import type { Static, TSchema } from "typebox";
++import type { Static } from "@earendil-works/pi-schema";
+ 
+ /**
+  * Stream function used by the agent loop. `Models.streamSimple` satisfies
+@@ -462,27 +462,39 @@ export interface AgentToolCallOutcome {
+  */
+ export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
+ 
+-/** Tool definition used by the agent runtime. */
+-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
++/**
++ * The arguments type of a tool with parameter schema `TParameters`: pi-schema's `Static<TParameters>` (the builders'
++ * type, TypeBox's for the common TypeBox kinds, else `unknown`), and `any` for `AgentTool<any>`.
++ */
++export type AgentToolParams<TParameters> = IsAny<TParameters> extends true ? any : Static<TParameters>;
++
++// `0 extends 1 & T` is resolved too early for a `T` constrained to `object`; this form waits for the argument.
++type IsAny<T> = boolean extends (T extends never ? true : false) ? true : false;
++
++/**
++ * Tool definition used by the agent runtime. `parameters` is any JSON Schema object; see {@link AgentToolParams} for
++ * the type `execute` receives.
++ */
++export interface AgentTool<TParameters extends object = object, TDetails = any> extends Tool<TParameters> {
+ 	/** Human-readable label for UI display. */
+ 	label: string;
+ 	/**
+ 	 * Optional compatibility shim for raw tool-call arguments before schema validation.
+ 	 * Must return an object that matches `TParameters`.
+ 	 */
+-	prepareArguments?: (args: unknown) => Static<TParameters>;
++	prepareArguments?: (args: unknown) => AgentToolParams<TParameters>;
+ 	/**
+ 	 * JSON Schema of `structuredContent` in successful results. Tools that declare it should always
+ 	 * set `structuredContent`.
+ 	 */
+-	outputSchema?: TSchema;
++	outputSchema?: object;
+ 	/**
+ 	 * Execute the tool call. Throw on failure, or return a result with `isError: true`; do not only
+ 	 * describe the failure in `content`.
+ 	 */
+ 	execute: (
+ 		toolCallId: string,
+-		params: Static<TParameters>,
++		params: AgentToolParams<TParameters>,
+ 		signal?: AbortSignal,
+ 		onUpdate?: AgentToolUpdateCallback<TDetails>,
+ 	) => Promise<AgentToolResult<TDetails>>;
+diff --git a/packages/ai/src/types.ts b/packages/ai/src/types.ts
+index 32b5a5f3..e435126e 100644
+--- a/packages/ai/src/types.ts
++++ b/packages/ai/src/types.ts
+@@ -742,8 +742,6 @@ export interface ClassifierResult {
+ 	timestamp: number; // Unix timestamp in milliseconds
+ }
+ 
+-import type { TSchema } from "typebox";
+-
+ /** OpenAI grammar variants for constrained sampling. */
+ export type GrammarFormat = "openai_lark" | "openai_regex";
+ 
+@@ -766,7 +764,11 @@ export type ConstrainedSamplingConfig =
+ 			variants: GrammarVariants;
+ 	  };
+ 
+-export interface Tool<TParameters extends TSchema = TSchema> {
++/**
++ * A tool the model may call. `parameters` is the JSON Schema of its arguments: pi-schema's builders (which also type
++ * the arguments, see `Static` in `@earendil-works/pi-schema`), TypeBox schemas, or any JSON Schema object.
++ */
++export interface Tool<TParameters extends object = object> {
+ 	name: string;
+ 	description: string;
+ 	parameters: TParameters;
+diff --git a/packages/ai/src/utils/retry.ts b/packages/ai/src/utils/retry.ts
+index a1e98403..eabf6c7d 100644
+--- a/packages/ai/src/utils/retry.ts
++++ b/packages/ai/src/utils/retry.ts
+@@ -28,6 +28,10 @@ const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
+ 	// Sign in with ChatGPT on a ChatGPT Business plan: a usage limit set by the
+ 	// workspace admin. Only the admin can raise it.
+ 	"subscription_sharing_workplace_individual_usage_limit_exceeded",
++
++	// Zhipu/Z.ai (open.bigmodel.cn) error code 1308: the plan's usage limit is
++	// reached, sent as HTTP 429. It resets after hours, not seconds (#11537).
++	'"code"\\s*:\\s*"?1308(?![0-9])',
+ ]);
+ 
+ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
+diff --git a/packages/ai/src/utils/transcript.ts b/packages/ai/src/utils/transcript.ts
+index 6f8a2691..e9bec79f 100644
+--- a/packages/ai/src/utils/transcript.ts
++++ b/packages/ai/src/utils/transcript.ts
+@@ -133,7 +133,7 @@ export function toToolDeclaration(tool: Tool): Tool {
+  * Whether two tools declare the same interface to the model.
+  *
+  * Both sides go through {@link toToolDeclaration} first: its JSON round-trip drops the
+- * typebox symbol keys and `undefined` fields that a structural comparison would see, and
++ * schema metadata keys (TypeBox's non-enumerable kind marks) and `undefined` fields that a structural comparison would see, and
+  * builds both objects with the same key order, so comparing the serialized declarations
+  * is exact. This avoids a deep-equal dependency in a browser-safe package.
+  */
+diff --git a/packages/ai/src/utils/validation.ts b/packages/ai/src/utils/validation.ts
+index c9e81883..586765bf 100644
+--- a/packages/ai/src/utils/validation.ts
++++ b/packages/ai/src/utils/validation.ts
+@@ -1,299 +1,34 @@
+-import { Compile } from "typebox/compile";
+-import type { TLocalizedValidationError } from "typebox/error";
+-import { Value } from "typebox/value";
++import { type CoercingValidator, compile } from "@earendil-works/pi-schema";
++import { formats } from "@earendil-works/pi-schema/formats";
+ import type { Tool, ToolCall } from "../types.ts";
+ 
+-const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
+-const TYPEBOX_KIND = Symbol.for("TypeBox.Kind");
++// One compiled validator per schema object: tool schemas are long-lived, so the WeakMap drops entries with their tools.
++const validatorCache = new WeakMap<object, CoercingValidator>();
+ 
+-interface JsonSchemaObject {
+-	type?: string | string[];
+-	properties?: Record<string, JsonSchemaObject>;
+-	required?: string[];
+-	items?: JsonSchemaObject | JsonSchemaObject[];
+-	additionalProperties?: boolean | JsonSchemaObject;
+-	allOf?: JsonSchemaObject[];
+-	anyOf?: JsonSchemaObject[];
+-	oneOf?: JsonSchemaObject[];
+-}
+-
+-function getSchemaTypes(schema: JsonSchemaObject): string[] {
+-	if (typeof schema.type === "string") {
+-		return [schema.type];
+-	}
+-	if (Array.isArray(schema.type)) {
+-		return schema.type.filter((type): type is string => typeof type === "string");
+-	}
+-	return [];
+-}
+-
+-function matchesJsonType(value: unknown, type: string): boolean {
+-	switch (type) {
+-		case "number":
+-			return typeof value === "number";
+-		case "integer":
+-			return typeof value === "number" && Number.isInteger(value);
+-		case "boolean":
+-			return typeof value === "boolean";
+-		case "string":
+-			return typeof value === "string";
+-		case "null":
+-			return value === null;
+-		case "array":
+-			return Array.isArray(value);
+-		case "object":
+-			return typeof value === "object" && value !== null && !Array.isArray(value);
+-		default:
+-			return false;
+-	}
+-}
+-
+-function getSubSchemaValidator(schema: JsonSchemaObject): ReturnType<typeof Compile> | undefined {
+-	try {
+-		return getValidator(schema as Tool["parameters"]);
+-	} catch {
+-		return undefined;
+-	}
+-}
+-
+-function coercePrimitiveByType(value: unknown, type: string): unknown {
+-	switch (type) {
+-		case "number": {
+-			if (value === null) {
+-				return 0;
+-			}
+-			if (typeof value === "string" && value.trim() !== "") {
+-				const parsed = Number(value);
+-				if (Number.isFinite(parsed)) {
+-					return parsed;
+-				}
+-			}
+-			if (typeof value === "boolean") {
+-				return value ? 1 : 0;
+-			}
+-			return value;
+-		}
+-		case "integer": {
+-			if (value === null) {
+-				return 0;
+-			}
+-			if (typeof value === "string" && value.trim() !== "") {
+-				const parsed = Number(value);
+-				if (Number.isInteger(parsed)) {
+-					return parsed;
+-				}
+-			}
+-			if (typeof value === "boolean") {
+-				return value ? 1 : 0;
+-			}
+-			return value;
+-		}
+-		case "boolean": {
+-			if (value === null) {
+-				return false;
+-			}
+-			if (typeof value === "string") {
+-				if (value === "true") {
+-					return true;
+-				}
+-				if (value === "false") {
+-					return false;
+-				}
+-			}
+-			if (typeof value === "number") {
+-				if (value === 1) {
+-					return true;
+-				}
+-				if (value === 0) {
+-					return false;
+-				}
+-			}
+-			return value;
+-		}
+-		case "string": {
+-			if (value === null) {
+-				return "";
+-			}
+-			if (typeof value === "number" || typeof value === "boolean") {
+-				return String(value);
+-			}
+-			return value;
+-		}
+-		case "null": {
+-			if (value === "" || value === 0 || value === false) {
+-				return null;
+-			}
+-			return value;
+-		}
+-		default:
+-			return value;
+-	}
+-}
+-
+-function applySchemaObjectCoercion(value: Record<string, unknown>, schema: JsonSchemaObject): void {
+-	const properties = schema.properties;
+-	const definedKeys = new Set<string>(properties ? Object.keys(properties) : []);
+-
+-	if (properties) {
+-		for (const [key, propertySchema] of Object.entries(properties)) {
+-			if (!(key in value)) {
+-				continue;
+-			}
+-			value[key] = coerceWithJsonSchema(value[key], propertySchema);
+-		}
+-	}
+-
+-	if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
+-		for (const [key, propertyValue] of Object.entries(value)) {
+-			if (definedKeys.has(key)) {
+-				continue;
+-			}
+-			value[key] = coerceWithJsonSchema(propertyValue, schema.additionalProperties);
+-		}
+-	}
+-}
+-
+-function applySchemaArrayCoercion(value: unknown[], schema: JsonSchemaObject): void {
+-	if (Array.isArray(schema.items)) {
+-		for (let index = 0; index < value.length; index++) {
+-			const itemSchema = schema.items[index];
+-			if (!itemSchema) {
+-				continue;
+-			}
+-			value[index] = coerceWithJsonSchema(value[index], itemSchema);
+-		}
+-		return;
+-	}
+-
+-	if (schema.items && typeof schema.items === "object") {
+-		for (let index = 0; index < value.length; index++) {
+-			value[index] = coerceWithJsonSchema(value[index], schema.items);
+-		}
+-	}
+-}
+-
+-function coerceWithUnionSchema(value: unknown, schemas: JsonSchemaObject[]): unknown {
+-	for (const schema of schemas) {
+-		const validator = getSubSchemaValidator(schema);
+-		if (validator?.Check(value)) {
+-			return value;
+-		}
+-	}
+-
+-	for (const schema of schemas) {
+-		const candidate = structuredClone(value);
+-		const coerced = coerceWithJsonSchema(candidate, schema);
+-		const validator = getSubSchemaValidator(schema);
+-		if (validator?.Check(coerced)) {
+-			return coerced;
+-		}
+-	}
+-	return value;
+-}
+-
+-function coerceWithJsonSchema(value: unknown, schema: JsonSchemaObject): unknown {
+-	let nextValue = value;
+-
+-	if (Array.isArray(schema.allOf)) {
+-		for (const nested of schema.allOf) {
+-			nextValue = coerceWithJsonSchema(nextValue, nested);
+-		}
+-	}
+-
+-	if (Array.isArray(schema.anyOf)) {
+-		nextValue = coerceWithUnionSchema(nextValue, schema.anyOf);
+-	}
+-
+-	if (Array.isArray(schema.oneOf)) {
+-		nextValue = coerceWithUnionSchema(nextValue, schema.oneOf);
+-	}
+-
+-	const schemaTypes = getSchemaTypes(schema);
+-	const matchesUnionMember =
+-		schemaTypes.length > 1 && schemaTypes.some((schemaType) => matchesJsonType(nextValue, schemaType));
+-	if (schemaTypes.length > 0 && !matchesUnionMember) {
+-		for (const schemaType of schemaTypes) {
+-			const candidate = coercePrimitiveByType(nextValue, schemaType);
+-			if (candidate !== nextValue) {
+-				nextValue = candidate;
+-				break;
+-			}
+-		}
+-	}
+-
+-	if (
+-		schemaTypes.includes("object") &&
+-		typeof nextValue === "object" &&
+-		nextValue !== null &&
+-		!Array.isArray(nextValue)
+-	) {
+-		applySchemaObjectCoercion(nextValue as Record<string, unknown>, schema);
+-	}
+-
+-	if (schemaTypes.includes("array") && Array.isArray(nextValue)) {
+-		applySchemaArrayCoercion(nextValue, schema);
+-	}
+-
+-	return nextValue;
+-}
+-
+-function normalizeOptionalNulls(value: unknown, schema: JsonSchemaObject): void {
+-	if (Array.isArray(value)) {
+-		if (Array.isArray(schema.items)) {
+-			for (let index = 0; index < value.length; index++) {
+-				const itemSchema = schema.items[index];
+-				if (itemSchema) normalizeOptionalNulls(value[index], itemSchema);
+-			}
+-		} else if (schema.items) {
+-			for (const item of value) normalizeOptionalNulls(item, schema.items);
+-		}
+-		return;
+-	}
+-	if (typeof value !== "object" || value === null || !schema.properties) return;
+-
+-	const object = value as Record<string, unknown>;
+-	const required = new Set(schema.required ?? []);
+-	for (const [key, propertySchema] of Object.entries(schema.properties)) {
+-		if (!(key in object)) continue;
+-		if (
+-			object[key] === null &&
+-			!required.has(key) &&
+-			typeof (propertySchema as { $ref?: unknown }).$ref !== "string" &&
+-			getSubSchemaValidator(propertySchema)?.Check(null) === false
+-		) {
+-			delete object[key];
+-		} else {
+-			normalizeOptionalNulls(object[key], propertySchema);
+-		}
+-	}
+-}
+-
+-function getValidator(schema: Tool["parameters"]): ReturnType<typeof Compile> {
+-	const key = schema as object;
+-	const cached = validatorCache.get(key);
++function getValidator(schema: Tool["parameters"]): CoercingValidator {
++	const cached = validatorCache.get(schema);
+ 	if (cached) {
+ 		return cached;
+ 	}
+-	const validator = Compile(schema);
+-	validatorCache.set(key, validator);
++	// A $ref that names nothing (a dangling definition in an MCP server's schema) rejects only values at its place,
++	// instead of making every call of the tool fail.
++	const validator = compile(schema, { formats, coerce: true, unresolvedRefs: "reject" });
++	validatorCache.set(schema, validator);
+ 	return validator;
+ }
+ 
+-function formatValidationPath(error: TLocalizedValidationError): string {
+-	if (error.keyword === "required") {
+-		const requiredProperties = (error.params as { requiredProperties?: string[] }).requiredProperties;
+-		const requiredProperty = requiredProperties?.[0];
+-		if (requiredProperty) {
+-			const basePath = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
+-			return basePath ? `${basePath}.${requiredProperty}` : requiredProperty;
+-		}
+-	}
+-	const path = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
+-	return path || "root";
++/** A pi-schema error path (a JSON Pointer) as the dotted path the model sees: `/edits/0/oldText` -> `edits.0.oldText`. */
++function formatValidationPath(pointer: string): string {
++	if (pointer === "") return "root";
++	return pointer
++		.slice(1)
++		.split("/")
++		.map((segment) => segment.replace(/~1/g, "/").replace(/~0/g, "~"))
++		.join(".");
+ }
+ 
+ /**
+- * Finds a tool by name and validates the tool call arguments against its TypeBox schema
++ * Finds a tool by name and validates the tool call arguments against its JSON Schema
+  * @param tools Array of tool definitions
+  * @param toolCall The tool call from the LLM
+  * @returns The validated arguments
+@@ -308,8 +43,10 @@ export function validateToolCall(tools: Tool[], toolCall: ToolCall): any {
+ }
+ 
+ /**
+- * Validates tool call arguments against the tool's TypeBox schema
+- * @param tool The tool definition with TypeBox schema
++ * Validates tool call arguments against the tool's JSON Schema (any JSON Schema: pi-schema's builders, TypeBox, plain
++ * objects). The arguments are coerced first (pi-schema's `parse()`): models often send `"42"` for a number, a single
++ * value for an array, or `null` for an omitted optional property.
++ * @param tool The tool definition with its JSON Schema
+  * @param toolCall The tool call from the LLM
+  * @returns The validated (and potentially coerced) arguments
+  * @throws Error with formatted message if validation fails
+@@ -318,34 +55,13 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
+ 	if (toolCall.argumentsError) {
+ 		throw new Error(`Invalid arguments for tool "${toolCall.name}": ${toolCall.argumentsError}`);
+ 	}
+-	const args = structuredClone(toolCall.arguments);
+-	normalizeOptionalNulls(args, tool.parameters as JsonSchemaObject);
+-	Value.Convert(tool.parameters, args);
+-
+-	const validator = getValidator(tool.parameters);
+-	if (!Object.getOwnPropertySymbols(tool.parameters).includes(TYPEBOX_KIND)) {
+-		const coerced = coerceWithJsonSchema(args, tool.parameters as JsonSchemaObject);
+-		if (coerced !== args) {
+-			if (typeof args === "object" && args !== null && typeof coerced === "object" && coerced !== null) {
+-				for (const key of Object.keys(args)) {
+-					delete args[key];
+-				}
+-				Object.assign(args, coerced);
+-			} else {
+-				return validator.Check(coerced) ? coerced : args;
+-			}
+-		}
+-	}
+-
+-	if (validator.Check(args)) {
+-		return args;
++	// A copy, so tools that modify their arguments never modify the tool call in the transcript.
++	const result = getValidator(tool.parameters).parse(structuredClone(toolCall.arguments));
++	if (result.ok) {
++		return result.value;
+ 	}
+ 
+-	const errors =
+-		validator
+-			.Errors(args)
+-			.map((error) => `  - ${formatValidationPath(error)}: ${error.message}`)
+-			.join("\n") || "Unknown validation error";
++	const errors = result.errors.map((error) => `  - ${formatValidationPath(error.path)}: ${error.message}`).join("\n");
+ 
+ 	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${errors}\n\nReceived arguments:\n${JSON.stringify(toolCall.arguments, null, 2)}`;
+ 
+diff --git a/packages/durable/src/harness/context.ts b/packages/durable/src/harness/context.ts
+index aa566080..d41e1a17 100644
+--- a/packages/durable/src/harness/context.ts
++++ b/packages/durable/src/harness/context.ts
+@@ -17,27 +17,31 @@ export type ContextBounds = {
+ };
+ 
+ /**
+- * Capture the bounds of the current context, or of the context cut off at the visible entry `at`, with two O(1)
+- * reads. Run this on the Session line; entries at or below the tail are immutable, so `deriveContext()` can then scan
+- * them off the line.
++ * Capture the bounds of the current context, or of the context cut off at the visible entry `at`. The newest entry
++ * and head marker are known from the Session's commits, so the current bounds usually cost no Storage read. Run this
++ * on the Session line; entries at or below the tail are immutable, so `deriveContext()` can then scan them off the
++ * line.
+  */
+ export async function captureContextBounds(
++	session: SessionImpl,
+ 	storage: Storage,
+ 	conversationId: ConversationId,
+ 	context: Context,
+ 	at?: EntryId,
++	/** Set when `at` is known to be visible, as an entry of a range of the conversation is. */
++	visible = false,
+ ): Promise<ContextBounds | undefined> {
+ 	let tail: EntryId | undefined;
+ 	if (at === undefined) {
+-		tail = (await storage.scanEntries({ conversationId }, 1, undefined, context)).items[0]?.id;
++		tail = await session.latestEntryId(conversationId, context);
+ 		if (tail === undefined) return undefined;
+ 	} else {
+-		if ((await storage.entry(conversationId, at, context)) === undefined) {
++		if (!visible && (await storage.entry(conversationId, at, context)) === undefined) {
+ 			throw new Error(`Entry ${at} is not visible from conversation ${conversationId}`);
+ 		}
+ 		tail = at;
+ 	}
+-	return { head: await storage.findLatestHeadMarker(conversationId, tail, context), tail };
++	return { head: await session.latestHeadMarker(conversationId, tail, context), tail };
+ }
+ 
+ /**
+@@ -60,6 +64,11 @@ export type ContextRange = {
+ 	readonly open: readonly Message[];
+ 	/** The baseline's system message; see `findBaseline()`. */
+ 	readonly baseline: Baseline;
++	/**
++	 * Whether the range reached the conversation's newest entry when it was read, so the entries of later commits extend
++	 * it (`advanceRange()`); a range cut off at an earlier entry is not.
++	 */
++	readonly current: boolean;
+ };
+ 
+ /** A baseline's system message, `null` when the range cannot have one, or `undefined` while a later entry may be one. */
+@@ -68,7 +77,9 @@ type Baseline = Message | null | undefined;
+ /**
+  * `readContext()` that reuses `previous`, an earlier range of the same conversation: with the same head marker, only
+  * entries after its tail are scanned. Returns the view and the range to pass to the next read. A range outlives the
+- * read, so its entries are frozen like `MemoryStorage` records, and the returned view has its own arrays.
++ * read, so its entries are frozen like `MemoryStorage` records, and the returned view has its own arrays. A caller that
++ * keeps the range for `advanceRange()` checks `current` again, synchronously where it installs it: a commit can be
++ * published between this function's return and the caller's continuation.
+  */
+ export async function readContextFrom(
+ 	session: SessionImpl,
+@@ -78,23 +89,33 @@ export async function readContextFrom(
+ 	at: EntryId | undefined,
+ 	previous: ContextRange | undefined,
+ ): Promise<{ readonly view: ContextView; readonly range: ContextRange | undefined }> {
+-	const bounds = await session.readOnLine(() => captureContextBounds(storage, conversationId, context, at));
++	const visible = at !== undefined && previous !== undefined && rangeEntry(previous, at) !== undefined;
++	const bounds = await session.readOnLine((line) =>
++		captureContextBounds(session, line, conversationId, context, at, visible),
++	);
+ 	if (bounds === undefined) return { view: emptyView(), range: undefined };
+ 	freezeJson(bounds.head);
++	const current = at === undefined;
+ 	let range: ContextRange;
+ 	if (previous === undefined || previous.bounds.head?.id !== bounds.head?.id) {
+-		range = deriveRange(bounds, freezeJson(await scanRange(storage, conversationId, rangeQuery(bounds), context)));
++		const entries = freezeJson(await scanRange(storage, conversationId, rangeQuery(bounds), context));
++		range = deriveRange(bounds, entries, current);
+ 	} else if (bounds.tail === previous.bounds.tail) {
+ 		range = previous;
+ 	} else if (bounds.tail < previous.bounds.tail) {
+ 		range = deriveRange(
+ 			bounds,
+ 			previous.entries.filter((entry) => entry.id <= bounds.tail),
++			false,
+ 		);
+ 	} else {
+ 		const minEntryId = idFromNumber<EntryId>(previous.bounds.tail + 1);
+ 		const added = await scanRange(storage, conversationId, { minEntryId, maxEntryId: bounds.tail }, context);
+-		range = extendRange(previous, bounds, freezeJson(added));
++		range = extendRange(previous, bounds, freezeJson(added), current);
++	}
++	// Entries committed while the scan ran off the line are not in the range: it is current only if none was.
++	if (range.current && session.knownLatestEntryId(conversationId) !== range.bounds.tail) {
++		range = { ...range, current: false };
+ 	}
+ 	const { view } = range;
+ 	return {
+@@ -116,7 +137,7 @@ export async function readContext(
+ 	context: Context,
+ 	at?: EntryId,
+ ): Promise<ContextView> {
+-	const bounds = await session.readOnLine(() => captureContextBounds(storage, conversationId, context, at));
++	const bounds = await session.readOnLine((line) => captureContextBounds(session, line, conversationId, context, at));
+ 	return deriveContext(storage, conversationId, bounds, context);
+ }
+ 
+@@ -133,15 +154,49 @@ export async function deriveContext(
+ 	context: Context,
+ ): Promise<ContextView> {
+ 	if (bounds === undefined) return emptyView();
+-	return deriveRange(bounds, await scanRange(storage, conversationId, rangeQuery(bounds), context)).view;
++	return deriveRange(bounds, await scanRange(storage, conversationId, rangeQuery(bounds), context), false).view;
+ }
+ 
+ function emptyView(): ContextView {
+ 	return { head: undefined, entries: [], contributions: [], messages: [] };
+ }
+ 
++/** Entry `id` of `range`, by binary search: a range holds its entries in ID order, every one visible from its conversation. */
++export function rangeEntry(range: ContextRange, id: EntryId): EntryRecord | undefined {
++	const entries = range.entries;
++	let low = 0;
++	let high = entries.length - 1;
++	while (low <= high) {
++		const middle = (low + high) >>> 1;
++		const entry = entries[middle]!;
++		if (entry.id === id) return entry;
++		if (entry.id < id) low = middle + 1;
++		else high = middle - 1;
++	}
++	return undefined;
++}
++
++/**
++ * `range` with the entries one commit appended to its conversation, in ID order, without reading Storage: the
++ * conversation's own new entries are its newest, and a new head marker's head never lies before the range's start.
++ * A range that is not `current` stays as it is; the next read extends it from Storage. `undefined` drops the range.
++ */
++export function advanceRange(range: ContextRange, appended: readonly EntryRecord[]): ContextRange | undefined {
++	if (!range.current || appended.length === 0) return range;
++	const added = freezeJson(appended);
++	let head = range.bounds.head;
++	for (const entry of added) if (entry.head !== undefined) head = entry as typeof head;
++	const bounds = { head, tail: added.at(-1)!.id };
++	if (head?.id === range.bounds.head?.id) return extendRange(range, bounds, added, true);
++	const start = head!.head;
++	// Heads only move forward: compaction keeps a later entry, a reset starts at itself, an older head is stale.
++	if (range.bounds.head !== undefined && start < range.bounds.head.head) return undefined;
++	const entries = [...range.entries, ...added].filter((entry) => entry.id >= start);
++	return deriveRange(bounds, entries, true);
++}
++
+ /** Derive the context view from the entries scanned within `bounds`. */
+-function deriveRange(bounds: ContextBounds, entries: readonly EntryRecord[]): ContextRange {
++function deriveRange(bounds: ContextBounds, entries: readonly EntryRecord[], current: boolean): ContextRange {
+ 	const edits = new Map<EntryId, ContextEdit>();
+ 	// Edits of every entry in the range count, including older head markers that `selectActive()` drops.
+ 	for (const entry of entries) for (const edit of entry.edits ?? []) edits.set(edit.target, edit);
+@@ -151,17 +206,22 @@ function deriveRange(bounds: ContextBounds, entries: readonly EntryRecord[]): Co
+ 	const baseline = findBaseline(bounds.head, active);
+ 	const messages = leadWithSystem([...settled, ...orderToolResults(open)], baseline);
+ 	const view = { head: bounds.head, entries: active, contributions, messages };
+-	return { bounds, entries, view, edited: new Set(edits.keys()), settled, open, baseline };
++	return { bounds, entries, view, edited: new Set(edits.keys()), settled, open, baseline, current };
+ }
+ 
+ /**
+  * `previous` extended by the entries `added` after its tail under the same head marker: only their contributions and
+  * the open messages are derived. An added edit can change an earlier entry, so it derives the whole range again.
+  */
+-function extendRange(previous: ContextRange, bounds: ContextBounds, added: readonly EntryRecord[]): ContextRange {
++function extendRange(
++	previous: ContextRange,
++	bounds: ContextBounds,
++	added: readonly EntryRecord[],
++	current: boolean,
++): ContextRange {
+ 	const entries = [...previous.entries, ...added];
+ 	if (added.some((entry) => entry.edits !== undefined || entry.head !== undefined || previous.edited.has(entry.id))) {
+-		return deriveRange(bounds, entries);
++		return deriveRange(bounds, entries, current);
+ 	}
+ 	const contributions = added.map((entry) => contribute(entry, undefined));
+ 	const { settled, open } = settle(previous.settled, [...previous.open, ...contributions.flat()]);
+@@ -172,7 +232,7 @@ function extendRange(previous: ContextRange, bounds: ContextBounds, added: reado
+ 		contributions: [...previous.view.contributions, ...contributions],
+ 		messages: leadWithSystem([...settled, ...orderToolResults(open)], baseline),
+ 	};
+-	return { bounds, entries, view, edited: previous.edited, settled, open, baseline };
++	return { bounds, entries, view, edited: previous.edited, settled, open, baseline, current };
+ }
+ 
+ /**
+diff --git a/packages/durable/src/search.ts b/packages/durable/src/search.ts
+index eb89772a..9dc6ed5e 100644
+--- a/packages/durable/src/search.ts
++++ b/packages/durable/src/search.ts
+@@ -3,7 +3,115 @@
+  * ranking: durable keeps its own copy of what it needs from the coding agent.
+  */
+ 
+-export type SearchDocument = { readonly name: string; readonly text: string };
++/** A tool as the ranker sees it: its name, its text, and the text of its namespace. */
++export type SearchDocument = {
++	readonly name: string;
++	/** Description and parameter names and descriptions; not the name, which the ranker reads from `name`. */
++	readonly text: string;
++	/** Name, description, and instructions of the tool's namespace. */
++	readonly namespaceText?: string;
++};
++
++/**
++ * Okapi BM25 (k1 1.2, b 0.75) over `text`, with the name and the namespace as separate fields: the names of the best
++ * matches, best first; ties keep document order.
++ * - A tool that matches more of the query's terms, in any field, ranks above one that matches fewer, whatever their
++ *   scores: for `screenshot window`, a tool whose description has both words beats `window` whose name has one.
++ * - A query term in the name scores more than any number of mentions in the text.
++ * - A tool whose whole local name (after the last `__`) is in the query gets a bonus worth one more match of every
++ *   query term, so among tools matching as many terms, `peekaboo app` finds `mcp__peekaboo__app` over tools that
++ *   only mention the words.
++ * - A query that is exactly a tool's name, or its name after a `__`, ranks that tool first, before coverage.
++ *
++ * Only `text` is length-normalized, so a long name or long namespace instructions do not lower a tool's score.
++ */
++export function rankDocuments(query: string, documents: readonly SearchDocument[], limit: number): string[] {
++	const queryTerms = new Set(tokenize(query));
++	if (queryTerms.size === 0 || documents.length === 0 || limit <= 0) return [];
++	const indexed = documents.map(indexDocument);
++	const averageLength = indexed.reduce((sum, document) => sum + document.textLength, 0) / indexed.length || 1;
++	const idf = new Map(
++		[...queryTerms].map((term) => {
++			const frequency = indexed.filter(
++				(document) =>
++					document.nameTerms.has(term) || document.textCounts.has(term) || document.namespaceTerms.has(term),
++			).length;
++			return [term, Math.log(1 + (indexed.length - frequency + 0.5) / (frequency + 0.5))] as const;
++		}),
++	);
++	const fullNameBonus = [...idf.values()].reduce((sum, value) => sum + value, 0);
++	const exactQuery = normalizeName(query);
++	const matches: { name: string; score: number; covered: number; exact: boolean }[] = [];
++	for (const document of indexed) {
++		const norm = K1 * (1 - B + (B * document.textLength) / averageLength);
++		let score = 0;
++		let covered = 0;
++		for (const term of queryTerms) {
++			const count = document.textCounts.get(term) ?? 0;
++			const weight =
++				(document.nameTerms.has(term) ? NAME_WEIGHT : 0) +
++				(document.namespaceTerms.has(term) ? NAMESPACE_WEIGHT : 0) +
++				(count * (K1 + 1)) / (count + norm);
++			if (weight > 0) covered++;
++			score += idf.get(term)! * weight;
++		}
++		if (score === 0) continue;
++		const local = document.localNameTerms;
++		if (local.length > 0 && local.every((term) => queryTerms.has(term))) score += fullNameBonus;
++		matches.push({ name: document.name, score, covered, exact: isExactNameQuery(exactQuery, document.name) });
++	}
++	return matches
++		.sort(
++			(left, right) =>
++				Number(right.exact) - Number(left.exact) || right.covered - left.covered || right.score - left.score,
++		)
++		.slice(0, limit)
++		.map((match) => match.name);
++}
++
++const K1 = 1.2;
++
++const B = 0.75;
++
++/**
++ * A query term in the name counts this many times its IDF. The text part of a term is at most `K1 + 1` (2.2) times
++ * its IDF and about 1 for a single mention, so a name match beats any number of mentions in the text.
++ */
++const NAME_WEIGHT = 3;
++
++/**
++ * A query term in the namespace text counts this many times its IDF. Every tool of the namespace shares it, so it helps
++ * find the namespace but not the tool in it.
++ */
++const NAMESPACE_WEIGHT = 0.5;
++
++/** A document split into the fields the ranker weighs differently. */
++type IndexedDocument = {
++	name: string;
++	/** Terms of the name: `mcp`, `app`, `thread`, `read` for `mcp__app__thread_read`. */
++	nameTerms: ReadonlySet<string>;
++	/** Terms of the name after its last `__`, the part models say: `thread`, `read`. */
++	localNameTerms: readonly string[];
++	textCounts: ReadonlyMap<string, number>;
++	textLength: number;
++	namespaceTerms: ReadonlySet<string>;
++};
++
++function indexDocument(document: SearchDocument): IndexedDocument {
++	const textCounts = new Map<string, number>();
++	for (const term of tokenize(document.text)) textCounts.set(term, (textCounts.get(term) ?? 0) + 1);
++	const segments = document.name.split("__");
++	return {
++		name: document.name,
++		nameTerms: new Set(tokenize(document.name)),
++		localNameTerms: [...new Set(tokenize(segments[segments.length - 1]!))],
++		textCounts,
++		textLength: [...textCounts.values()].reduce((sum, count) => sum + count, 0),
++		namespaceTerms: new Set(tokenize(document.namespaceText ?? "")),
++	};
++}
++
++const wordSegmenter = new Intl.Segmenter(undefined, { granularity: "word" });
+ 
+ const STOP_WORDS: ReadonlySet<string> = new Set([
+ 	"a",
+@@ -29,6 +137,24 @@ const STOP_WORDS: ReadonlySet<string> = new Set([
+ 	"with",
+ ]);
+ 
++/** Unicode word segmentation with identifier boundaries and English stop words/singular forms. */
++export function tokenize(text: string): string[] {
++	const normalized = text
++		.normalize("NFC")
++		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
++		.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
++		.toLowerCase()
++		.replace(/[^\p{L}\p{M}\p{N}]+/gu, " ");
++	// The segmenter costs about 15 times a split. Plain ASCII splits into the same words at spaces, so only other
++	// text, such as Chinese written without spaces, goes through it.
++	const words = /^[a-z0-9 ]*$/.test(normalized)
++		? normalized.split(" ")
++		: Array.from(wordSegmenter.segment(normalized), (segment) => (segment.isWordLike ? segment.segment : ""));
++	return words
++		.filter((word) => word.length > 0 && !STOP_WORDS.has(word))
++		.map((word) => (/^[a-z0-9]+$/.test(word) ? stem(word) : word));
++}
++
+ /** Naive singular form, so `issues` matches `issue` and `searches` matches `search`. */
+ function stem(term: string): string {
+ 	if (term.length > 4 && term.endsWith("ies")) return `${term.slice(0, -3)}y`;
+@@ -37,49 +163,19 @@ function stem(term: string): string {
+ 	return term;
+ }
+ 
+-/** Lowercase terms, split at camelCase boundaries and non-alphanumerics, without stop words. */
+-export function tokenize(text: string): string[] {
+-	return text
+-		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+-		.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
++/** Lowercase with characters invalid in script identifiers as `_`, so `dev-radius` matches `dev_radius`. */
++function normalizeName(name: string): string {
++	return name
++		.trim()
+ 		.toLowerCase()
+-		.split(/[^a-z0-9]+/)
+-		.filter((term) => term.length > 0 && !STOP_WORDS.has(term))
+-		.map(stem);
++		.replace(/[^a-z0-9_$]/g, "_");
+ }
+ 
+-/** Okapi BM25 (k1 1.2, b 0.75): the names of the best matches, best first; ties keep document order. */
+-export function rankDocuments(query: string, documents: readonly SearchDocument[], limit: number): string[] {
+-	const k1 = 1.2;
+-	const b = 0.75;
+-	const queryTerms = [...new Set(tokenize(query))];
+-	if (queryTerms.length === 0 || documents.length === 0 || limit <= 0) return [];
+-	const termCounts = documents.map((document) => {
+-		const counts = new Map<string, number>();
+-		for (const term of tokenize(document.text)) counts.set(term, (counts.get(term) ?? 0) + 1);
+-		return counts;
+-	});
+-	const lengths = termCounts.map((counts) => [...counts.values()].reduce((sum, count) => sum + count, 0));
+-	const averageLength = lengths.reduce((sum, length) => sum + length, 0) / documents.length || 1;
+-	const idf = new Map(
+-		queryTerms.map((term) => {
+-			const frequency = termCounts.filter((counts) => counts.has(term)).length;
+-			return [term, Math.log(1 + (documents.length - frequency + 0.5) / (frequency + 0.5))] as const;
+-		}),
+-	);
+-	const matches: { name: string; score: number }[] = [];
+-	documents.forEach((document, index) => {
+-		let score = 0;
+-		for (const term of queryTerms) {
+-			const count = termCounts[index]!.get(term);
+-			if (!count) continue;
+-			const norm = k1 * (1 - b + (b * lengths[index]!) / averageLength);
+-			score += (idf.get(term) ?? 0) * ((count * (k1 + 1)) / (count + norm));
+-		}
+-		if (score > 0) matches.push({ name: document.name, score });
+-	});
+-	return matches
+-		.sort((left, right) => right.score - left.score)
+-		.slice(0, limit)
+-		.map((match) => match.name);
++/**
++ * Whether the whole query is the tool's name: its full name or a suffix after a `__` separator, so `thread_read` and
++ * `app__thread_read` both name `mcp__app__thread_read`.
++ */
++function isExactNameQuery(query: string, name: string): boolean {
++	const normalized = normalizeName(name);
++	return normalized === query || normalized.endsWith(`__${query}`);
+ }
+diff --git a/packages/durable/src/tool-search/tool-search.ts b/packages/durable/src/tool-search/tool-search.ts
+index ca600ae5..5d79b007 100644
+--- a/packages/durable/src/tool-search/tool-search.ts
++++ b/packages/durable/src/tool-search/tool-search.ts
+@@ -3,7 +3,7 @@
+  * and the matches are loaded with `control.addTools`, so the next request offers them. Loading writes the
+  * conversation's `modelTools` (its `add`), so loaded tools stay offered on that branch, also after a compaction.
+  */
+-import { Type } from "@earendil-works/pi-ai";
++import { num, obj, opt, str } from "@earendil-works/pi-schema";
+ import { defineExtension, defineTool } from "../harness/define.ts";
+ import type { ToolRegistration } from "../harness/types.ts";
+ import { rankDocuments } from "../search.ts";
+@@ -14,12 +14,13 @@ export const DEFAULT_TOOL_SEARCH_LIMIT = 8;
+ /** Fixed, so it does not change while deferred tools are registered, for example as MCP servers connect. */
+ const TOOL_SEARCH_DESCRIPTION = `# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nSome of the tools, such as tools of MCP servers, may not have been provided to you upfront, and you should use this tool (\`${TOOL_SEARCH_TOOL_NAME}\`) to search for the required tools. For MCP tool discovery, always use \`${TOOL_SEARCH_TOOL_NAME}\`.`;
+ 
+-const toolSearchSchema = Type.Object({
+-	query: Type.String({ description: "Search query for deferred tools." }),
+-	limit: Type.Optional(
+-		Type.Number({ description: `Maximum number of tools to return. Defaults to ${DEFAULT_TOOL_SEARCH_LIMIT}.` }),
+-	),
+-});
++const toolSearchSchema = obj(
++	{
++		query: str({ description: "Search query for deferred tools." }),
++		limit: opt(num({ description: `Maximum number of tools to return. Defaults to ${DEFAULT_TOOL_SEARCH_LIMIT}.` })),
++	},
++	{ open: true },
++);
+ 
+ /** `tool_search` result details: the tools it loaded. */
+ export type ToolSearchToolDetails = { loaded: string[] };
+@@ -45,9 +46,9 @@ function schemaText(schema: unknown, parts: string[]): void {
+ 	}
+ }
+ 
+-/** Search text of a tool: its name, the name with `_` as spaces, its description, and its parameters' text. */
++/** Search text of a tool: its description and its parameters' names and descriptions; the ranker reads the name. */
+ function searchText(tool: ToolRegistration): string {
+-	const parts = [tool.name, tool.name.replaceAll("_", " "), tool.description];
++	const parts = [tool.description];
+ 	schemaText(tool.parameters, parts);
+ 	return parts.filter((part) => part.trim() !== "").join(" ");
+ }

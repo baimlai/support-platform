@@ -57,6 +57,8 @@ from app.runtime.contracts import (
     TurnEnd,
     TurnStart,
 )
+from app.runtime.pi_reference.compaction import CompactionSettings
+from app.runtime.pi_reference.retry import RetryPolicy
 
 
 def _load_ticket(path: Path) -> dict[str, Any]:
@@ -175,6 +177,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="手工覆盖 MCP 模拟数据；场景工单默认使用 ticket.dataset",
     )
     run_parser.add_argument("--max-turns", type=int, default=10, help="最大轮数，默认 10")
+    run_parser.add_argument("--model-retries", type=int, default=2, help="模型临时错误最多重试次数，0 关闭")
+    run_parser.add_argument(
+        "--compact", action="store_true", help="启用历史摘要；mock 使用明确标注的摘录模式",
+    )
+    run_parser.add_argument("--compact-trigger", type=int, default=10000, help="触发摘要的字符估算阈值")
+    run_parser.add_argument("--compact-keep", type=int, default=4, help="摘要后至少保留多少条近期消息")
     run_parser.add_argument(
         "--tool-timeout",
         type=float,
@@ -402,6 +410,10 @@ async def _run_ticket(args: argparse.Namespace) -> Any:
         model_name=args.model,
         model_base_url=args.model_base,
         model_timeout_s=args.model_timeout,
+        retry_policy=RetryPolicy(max_retries=args.model_retries),
+        compaction=CompactionSettings(
+            enabled=args.compact, trigger_chars=args.compact_trigger, keep_recent_messages=args.compact_keep,
+        ),
         dataset_path=dataset_path,
         mcp_transport=args.mcp_transport,
         mcp_url=args.mcp_url,

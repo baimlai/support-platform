@@ -185,8 +185,10 @@ class RunRecorder:
                 },
             )
 
+            source = None
             try:
-                async for event in stream_fn(request):
+                source = stream_fn(request)
+                async for event in source:
                     self._append_jsonl(
                         self.model_responses_path,
                         {
@@ -207,6 +209,12 @@ class RunRecorder:
                     },
                 )
                 raise
+            finally:
+                # 外层读到 done 后会提前 return；显式关闭内层生成器，让模型适配器的
+                # async with 及时释放 HTTP 响应，而不是依赖垃圾回收碰巧触发清理。
+                close = getattr(source, "aclose", None)
+                if close is not None:
+                    await close()
 
         return wrapped
 

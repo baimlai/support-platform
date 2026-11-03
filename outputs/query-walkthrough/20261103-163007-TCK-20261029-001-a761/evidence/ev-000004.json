@@ -1,0 +1,18 @@
+{
+  "evidence_id": "ev-000004",
+  "run_id": "20261103-163007-TCK-20261029-001-a761",
+  "tool_call_id": "call-6",
+  "tool_name": "lock_wait_query",
+  "created_at": "2026-11-03T08:30:07.740581+00:00",
+  "size_chars": 407,
+  "is_error": false,
+  "truncated": false,
+  "duration_ms": 0,
+  "content": "{\n  \"mock\": true,\n  \"instance_id\": \"db-mysql-001\",\n  \"requested_range\": {\n    \"start\": \"2026-10-29T10:00:00+08:00\",\n    \"end\": \"2026-10-29T11:00:00+08:00\"\n  },\n  \"status\": \"no_data\",\n  \"samples\": [],\n  \"source\": \"lock_wait_service (mock)\",\n  \"coverage\": {\n    \"start\": \"2026-10-29T10:00:00+08:00\",\n    \"end\": \"2026-10-29T11:00:00+08:00\",\n    \"coverage_ratio\": 1.0\n  },\n  \"note\": \"采样窗口内没有锁等待样本；无样本不等于没有锁等待\"\n}",
+  "details": {
+    "mock": true,
+    "source": "lock_wait_service (mock)",
+    "status": "no_data",
+    "sample_count": 0
+  }
+}

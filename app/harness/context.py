@@ -66,6 +66,7 @@ from app.runtime.contracts import (
     content_text,
     to_jsonable,
 )
+from app.runtime.pi_reference.compaction import ContextCompactor
 
 BEGIN_TICKET = "<BEGIN_TICKET_JSON>"
 END_TICKET = "<END_TICKET_JSON>"
@@ -191,6 +192,7 @@ def make_transform_context(
     ticket: dict[str, Any],
     topic_provider: Callable[[], dict[str, Any]],
     budget: ContextBudget,
+    compactor: ContextCompactor | None = None,
 ) -> TransformContextHook:
     """创建一个“每轮模型请求前裁剪上下文”的钩子。
 
@@ -208,9 +210,12 @@ def make_transform_context(
         messages: list[Message],
         cancellation: CancellationToken,
     ) -> list[Message]:
-        # `del` 只是告诉阅读者和 lint：这个钩子不需要取消令牌。
-        # 真正的取消检查由内核在每轮开始和工具执行前后完成。
-        del cancellation
+        # 先把旧历史换成有检查点的摘要视图，再加最新 Topic、做常规预算裁剪。
+        # 两步都返回新列表；完整 messages 不会被删除，事后仍能审计原过程。
+        if compactor is not None:
+            messages = await compactor.transform(
+                messages, cancellation, turn=int(context.metadata.get("turn", 0)),
+            )
         built, info = build_model_context(
             messages=messages,
             ticket=ticket,
@@ -218,6 +223,12 @@ def make_transform_context(
             budget=budget,
         )
         context.metadata["context_budget"] = info
+        if compactor is not None:
+            context.metadata["compaction"] = {
+                "enabled": compactor.settings.enabled,
+                "through": compactor.checkpoint.through if compactor.checkpoint else 0,
+                "last_error": compactor.last_error,
+            }
         return built
 
     return transform

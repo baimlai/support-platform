@@ -1,0 +1,690 @@
+{
+  "nodes": {
+    "http": {
+      "path": "app/api/main.py",
+      "function": "create_task",
+      "role": "HTTP 请求校验后交给任务服务",
+      "origin": "平台"
+    },
+    "create": {
+      "path": "app/api/service.py",
+      "function": "TaskService.create_task",
+      "role": "校验模型/Skill/数据、入库、启动后台任务",
+      "origin": "平台"
+    },
+    "ticket": {
+      "path": "app/api/service.py",
+      "function": "TaskService._build_ticket",
+      "role": "把用户 query 放进模拟工单范围",
+      "origin": "平台"
+    },
+    "background": {
+      "path": "app/api/service.py",
+      "function": "TaskService._run_task",
+      "role": "组装 RunOptions、等待 Runner、更新任务终态",
+      "origin": "平台"
+    },
+    "store": {
+      "path": "app/api/store.py",
+      "function": "TaskStore.create",
+      "role": "在 SQLite 保存任务元信息",
+      "origin": "平台"
+    },
+    "runner": {
+      "path": "app/harness/runner.py",
+      "function": "AgentRunner.run",
+      "role": "创建模型、Skill、记录器并管理 MCP 连接生命周期",
+      "origin": "平台"
+    },
+    "assemble": {
+      "path": "app/harness/runner.py",
+      "function": "AgentRunner._run_with_mcp",
+      "role": "装配工具会话、Topic、上下文、重试和 Agent",
+      "origin": "平台"
+    },
+    "emit": {
+      "path": "app/harness/runner.py",
+      "function": "AgentRunner._run_with_mcp.emit",
+      "role": "先落事件，再通知调用方，再更新 Topic",
+      "origin": "平台"
+    },
+    "skill": {
+      "path": "app/harness/skills.py",
+      "function": "load_skill",
+      "role": "读取调查方法和初始工具声明",
+      "origin": "平台"
+    },
+    "model": {
+      "path": "app/adapters/models.py",
+      "function": "build_model",
+      "role": "选择 mock 或 DeepSeek 适配器",
+      "origin": "平台"
+    },
+    "mcp_connect": {
+      "path": "app/mcp/client.py",
+      "function": "DbaMcpClient.__aenter__",
+      "role": "启动/连接 MCP、初始化并获取工具目录",
+      "origin": "平台适配"
+    },
+    "mcp_specs": {
+      "path": "app/mcp/client.py",
+      "function": "DbaMcpClient.tool_specs",
+      "role": "把 MCP 声明和 handler 转成 ToolSpec",
+      "origin": "平台适配"
+    },
+    "mcp_handler": {
+      "path": "app/mcp/client.py",
+      "function": "DbaMcpClient._make_handler.handler",
+      "role": "闭包记住工具名，通过 MCP 执行",
+      "origin": "平台适配"
+    },
+    "mcp_call": {
+      "path": "app/mcp/client.py",
+      "function": "DbaMcpClient.call_tool",
+      "role": "SDK tools/call、错误和结果转换",
+      "origin": "平台适配"
+    },
+    "server_tool": {
+      "path": "app/mcp/server.py",
+      "function": "create_server.slow_log_query",
+      "role": "服务端 MCP 方法，接收参数并调用业务函数",
+      "origin": "平台模拟"
+    },
+    "business": {
+      "path": "app/mcp/dba_tools.py",
+      "function": "slow_log_query",
+      "role": "从 fixture 筛选实例与时间范围内的慢日志",
+      "origin": "平台模拟"
+    },
+    "prompt": {
+      "path": "app/runtime/pi_reference/agent.py",
+      "function": "Agent.prompt",
+      "role": "追加用户输入，启动一轮完整运行",
+      "origin": "Pi 移植"
+    },
+    "agent_run": {
+      "path": "app/runtime/pi_reference/agent.py",
+      "function": "Agent._run",
+      "role": "并发保护、安装队列函数、调用底层 Loop",
+      "origin": "Pi 移植/适配"
+    },
+    "receive": {
+      "path": "app/runtime/pi_reference/agent.py",
+      "function": "Agent._receive",
+      "role": "更新流式状态并顺序通知订阅者",
+      "origin": "Pi 移植"
+    },
+    "steer": {
+      "path": "app/runtime/pi_reference/agent.py",
+      "function": "Agent.steer",
+      "role": "运行中的补充/纠正先入队",
+      "origin": "Pi 移植"
+    },
+    "followup": {
+      "path": "app/runtime/pi_reference/agent.py",
+      "function": "Agent.follow_up",
+      "role": "自然结束后的追问先入队",
+      "origin": "Pi 移植"
+    },
+    "continue": {
+      "path": "app/runtime/pi_reference/agent.py",
+      "function": "Agent.continue_run",
+      "role": "不重复追加原 query，从当前上下文继续",
+      "origin": "Pi 移植"
+    },
+    "loop": {
+      "path": "app/runtime/pi_reference/loop.py",
+      "function": "run_agent_loop",
+      "role": "初始化运行状态、错误边界和最终结果",
+      "origin": "Pi 移植/平台保护"
+    },
+    "turns": {
+      "path": "app/runtime/pi_reference/loop.py",
+      "function": "_run_turns",
+      "role": "每轮准备、调用模型、执行工具、继续/停止",
+      "origin": "Pi 移植"
+    },
+    "stream": {
+      "path": "app/runtime/pi_reference/loop.py",
+      "function": "_stream_assistant_response",
+      "role": "整理请求、消费模型流、生成助手消息",
+      "origin": "Pi 移植"
+    },
+    "make_transform": {
+      "path": "app/harness/context.py",
+      "function": "make_transform_context",
+      "role": "创建并返回记住工单/Topic/预算的闭包",
+      "origin": "平台"
+    },
+    "transform": {
+      "path": "app/harness/context.py",
+      "function": "make_transform_context.transform",
+      "role": "先摘要视图，再拼 Topic 和有界上下文",
+      "origin": "平台"
+    },
+    "context": {
+      "path": "app/harness/context.py",
+      "function": "build_model_context",
+      "role": "固定头和近期完整工具块的预算裁剪",
+      "origin": "平台"
+    },
+    "compact": {
+      "path": "app/runtime/pi_reference/compaction.py",
+      "function": "ContextCompactor.transform",
+      "role": "选安全前缀、摘要校验、原子提交检查点",
+      "origin": "Pi 参考/适配"
+    },
+    "summary": {
+      "path": "app/adapters/context_summary.py",
+      "function": "make_model_summarizer.summarize",
+      "role": "用无工具权限的独立模型请求生成摘要",
+      "origin": "平台适配"
+    },
+    "mock_summary": {
+      "path": "app/adapters/context_summary.py",
+      "function": "extractive_mock_summary",
+      "role": "明确标注的模拟摘录，不冒充语义摘要",
+      "origin": "平台模拟"
+    },
+    "retry": {
+      "path": "app/runtime/pi_reference/retry.py",
+      "function": "with_model_retry.stream",
+      "role": "分类临时错误、可取消退避、逐次尝试",
+      "origin": "Pi 参考/流适配"
+    },
+    "record_stream": {
+      "path": "app/adapters/run_recorder.py",
+      "function": "RunRecorder.wrap_stream_fn.wrapped",
+      "role": "每次尝试保存真实请求与模型流事件",
+      "origin": "平台"
+    },
+    "mock_stream": {
+      "path": "app/adapters/mock_model.py",
+      "function": "MockDbaModel._stream",
+      "role": "从 Topic 和实际结果确定下一步模拟动作",
+      "origin": "平台模拟"
+    },
+    "mock_action": {
+      "path": "app/adapters/mock_model.py",
+      "function": "MockDbaModel._next_action",
+      "role": "慢 SQL 六轮剧本或多场景引擎",
+      "origin": "平台模拟"
+    },
+    "real_stream": {
+      "path": "app/adapters/deepseek_model.py",
+      "function": "DeepSeekModel._stream",
+      "role": "构造 HTTP 请求、读取 SSE、合并工具参数",
+      "origin": "平台适配"
+    },
+    "execute": {
+      "path": "app/runtime/pi_reference/loop.py",
+      "function": "_execute_tool_calls",
+      "role": "顺序执行本轮工具、后处理、发送结果事件",
+      "origin": "Pi 移植"
+    },
+    "prepare_tool": {
+      "path": "app/runtime/pi_reference/loop.py",
+      "function": "_prepare_and_execute_tool",
+      "role": "查找可见工具、校验、前置 Hook、超时执行",
+      "origin": "Pi 移植/超时扩展"
+    },
+    "validate": {
+      "path": "app/runtime/pi_reference/loop.py",
+      "function": "_validate_tool_arguments",
+      "role": "用 JSON Schema 校验参数并深复制",
+      "origin": "Python 适配"
+    },
+    "search_tool": {
+      "path": "app/harness/tool_search.py",
+      "function": "build_platform_tools.search_tools",
+      "role": "平台工具入口，搜索并加载后续能力",
+      "origin": "平台"
+    },
+    "search_session": {
+      "path": "app/harness/tool_search.py",
+      "function": "ToolSession.search",
+      "role": "维护可见工具集合和搜索记录",
+      "origin": "平台"
+    },
+    "search_specs": {
+      "path": "app/harness/tool_search.py",
+      "function": "search_tool_specs",
+      "role": "将 DBA 别名和工具 Schema 送入排名器",
+      "origin": "平台适配"
+    },
+    "rank": {
+      "path": "app/runtime/pi_reference/search.py",
+      "function": "rank_documents",
+      "role": "精确名称、覆盖数、分字段 BM25 排名",
+      "origin": "Pi 移植/中文适配"
+    },
+    "read_tool": {
+      "path": "app/harness/tool_search.py",
+      "function": "build_platform_tools.evidence_read",
+      "role": "按引用读取当前任务的证据分页",
+      "origin": "平台"
+    },
+    "process": {
+      "path": "app/harness/evidence.py",
+      "function": "EvidenceProcessor.after_tool_call",
+      "role": "完整结果保存后，再生成有界模型内容",
+      "origin": "平台"
+    },
+    "save_evidence": {
+      "path": "app/harness/evidence.py",
+      "function": "EvidenceStore.save",
+      "role": "保存原始证据和索引",
+      "origin": "平台"
+    },
+    "bound": {
+      "path": "app/harness/evidence.py",
+      "function": "_bound_content",
+      "role": "生成引用、摘要和截断预览的 JSON 信封",
+      "origin": "平台"
+    },
+    "truncate": {
+      "path": "app/runtime/pi_reference/truncate.py",
+      "function": "truncate_text",
+      "role": "按完整行与 UTF-8 字节限制预览",
+      "origin": "Pi 移植"
+    },
+    "read_evidence": {
+      "path": "app/harness/evidence.py",
+      "function": "EvidenceStore.read",
+      "role": "校验引用并按字符读取证据片段",
+      "origin": "平台"
+    },
+    "topic": {
+      "path": "app/harness/topic.py",
+      "function": "TopicManager.update_from_event",
+      "role": "根据工具结果更新事实/候选/未验证项",
+      "origin": "平台"
+    },
+    "persist_topic": {
+      "path": "app/harness/topic.py",
+      "function": "TopicManager._persist",
+      "role": "持久化当前 Topic",
+      "origin": "平台"
+    },
+    "finish": {
+      "path": "app/adapters/run_recorder.py",
+      "function": "RunRecorder.finish",
+      "role": "保存完整历史、报告和能力快照",
+      "origin": "平台"
+    },
+    "turn_context": {
+      "path": "app/api/service.py",
+      "function": "TaskService.read_turn_context",
+      "role": "按真实轮次读最终模型尝试，跳过摘要请求",
+      "origin": "平台"
+    },
+    "report": {
+      "path": "app/api/service.py",
+      "function": "TaskService.get_report",
+      "role": "任务终态后读取最终报告",
+      "origin": "平台"
+    },
+    "walk": {
+      "path": "app/walkthrough.py",
+      "function": "run_walkthrough",
+      "role": "执行含补充和追问的可重现样例",
+      "origin": "教学入口"
+    },
+    "continue_loop": {
+      "path": "app/runtime/pi_reference/loop.py",
+      "function": "run_agent_loop_continue",
+      "role": "校验已有历史后从不追加新prompt的入口继续",
+      "origin": "Pi 移植"
+    },
+    "resolve_tools": {
+      "path": "app/runtime/pi_reference/loop.py",
+      "function": "_resolve_tools",
+      "role": "每次请求/执行前获取当前可见工具",
+      "origin": "平台扩展"
+    },
+    "visible_tools": {
+      "path": "app/harness/tool_search.py",
+      "function": "ToolSession.visible_specs",
+      "role": "返回本次会话当前已加载工具的新列表",
+      "origin": "平台"
+    }
+  },
+  "edges": [
+    {
+      "from": "http",
+      "to": "create",
+      "site": "create_task",
+      "kind": "直接调用"
+    },
+    {
+      "from": "create",
+      "to": "ticket",
+      "site": "_build_ticket",
+      "kind": "直接调用"
+    },
+    {
+      "from": "create",
+      "to": "store",
+      "site": "create",
+      "kind": "直接调用"
+    },
+    {
+      "from": "create",
+      "to": "background",
+      "site": "_run_task",
+      "kind": "create_task 启动后台协程"
+    },
+    {
+      "from": "background",
+      "to": "runner",
+      "site": "run",
+      "kind": "直接调用"
+    },
+    {
+      "from": "runner",
+      "to": "model",
+      "site": "build_model",
+      "kind": "直接调用"
+    },
+    {
+      "from": "runner",
+      "to": "skill",
+      "site": "load_skill",
+      "kind": "直接调用"
+    },
+    {
+      "from": "runner",
+      "to": "mcp_connect",
+      "site": "DbaMcpClient",
+      "kind": "async with 初始化"
+    },
+    {
+      "from": "runner",
+      "to": "assemble",
+      "site": "_run_with_mcp",
+      "kind": "直接调用"
+    },
+    {
+      "from": "assemble",
+      "to": "mcp_specs",
+      "site": "tool_specs",
+      "kind": "直接调用"
+    },
+    {
+      "from": "assemble",
+      "to": "make_transform",
+      "site": "make_transform_context",
+      "kind": "创建闭包"
+    },
+    {
+      "from": "assemble",
+      "to": "prompt",
+      "site": "prompt",
+      "kind": "直接调用"
+    },
+    {
+      "from": "assemble",
+      "to": "finish",
+      "site": "finish",
+      "kind": "直接调用"
+    },
+    {
+      "from": "prompt",
+      "to": "agent_run",
+      "site": "_run",
+      "kind": "直接调用"
+    },
+    {
+      "from": "continue",
+      "to": "agent_run",
+      "site": "_run",
+      "kind": "直接调用"
+    },
+    {
+      "from": "agent_run",
+      "to": "loop",
+      "site": "run_agent_loop",
+      "kind": "直接调用"
+    },
+    {
+      "from": "loop",
+      "to": "turns",
+      "site": "_run_turns",
+      "kind": "直接调用"
+    },
+    {
+      "from": "turns",
+      "to": "stream",
+      "site": "_stream_assistant_response",
+      "kind": "逐轮调用"
+    },
+    {
+      "from": "stream",
+      "to": "transform",
+      "site": "transform_context",
+      "kind": "config 注入的 Hook"
+    },
+    {
+      "from": "transform",
+      "to": "compact",
+      "site": "transform",
+      "kind": "可选摘要策略"
+    },
+    {
+      "from": "transform",
+      "to": "context",
+      "site": "build_model_context",
+      "kind": "直接调用"
+    },
+    {
+      "from": "compact",
+      "to": "summary",
+      "site": "summarize",
+      "kind": "注入真实模型摘要器（deepseek）"
+    },
+    {
+      "from": "compact",
+      "to": "mock_summary",
+      "site": "summarize",
+      "kind": "注入模拟摘录器（mock）"
+    },
+    {
+      "from": "stream",
+      "to": "retry",
+      "site": "stream_fn",
+      "kind": "注入模型包装函数"
+    },
+    {
+      "from": "retry",
+      "to": "record_stream",
+      "site": "stream_fn",
+      "kind": "注入记录包装函数"
+    },
+    {
+      "from": "record_stream",
+      "to": "mock_stream",
+      "site": "stream_fn",
+      "kind": "mock 分支"
+    },
+    {
+      "from": "record_stream",
+      "to": "real_stream",
+      "site": "stream_fn",
+      "kind": "deepseek 分支"
+    },
+    {
+      "from": "mock_stream",
+      "to": "mock_action",
+      "site": "_next_action",
+      "kind": "直接调用"
+    },
+    {
+      "from": "turns",
+      "to": "execute",
+      "site": "_execute_tool_calls",
+      "kind": "本轮含工具调用时"
+    },
+    {
+      "from": "execute",
+      "to": "prepare_tool",
+      "site": "_prepare_and_execute_tool",
+      "kind": "逐个工具调用"
+    },
+    {
+      "from": "prepare_tool",
+      "to": "validate",
+      "site": "_validate_tool_arguments",
+      "kind": "执行前校验"
+    },
+    {
+      "from": "prepare_tool",
+      "to": "mcp_handler",
+      "site": "handler",
+      "kind": "ToolSpec.handler 动态绑定（业务工具）"
+    },
+    {
+      "from": "mcp_handler",
+      "to": "mcp_call",
+      "site": "call_tool",
+      "kind": "直接调用"
+    },
+    {
+      "from": "server_tool",
+      "to": "business",
+      "site": "slow_log_query",
+      "kind": "MCP 服务端本地调用"
+    },
+    {
+      "from": "prepare_tool",
+      "to": "search_tool",
+      "site": "handler",
+      "kind": "ToolSpec.handler 动态绑定（搜索工具）"
+    },
+    {
+      "from": "search_tool",
+      "to": "search_session",
+      "site": "search",
+      "kind": "直接调用"
+    },
+    {
+      "from": "search_session",
+      "to": "search_specs",
+      "site": "search_tool_specs",
+      "kind": "直接调用"
+    },
+    {
+      "from": "search_specs",
+      "to": "rank",
+      "site": "rank_documents",
+      "kind": "直接调用"
+    },
+    {
+      "from": "prepare_tool",
+      "to": "read_tool",
+      "site": "handler",
+      "kind": "ToolSpec.handler 动态绑定（证据工具）"
+    },
+    {
+      "from": "read_tool",
+      "to": "read_evidence",
+      "site": "read",
+      "kind": "直接调用"
+    },
+    {
+      "from": "execute",
+      "to": "process",
+      "site": "after_tool_call",
+      "kind": "config 注入的后置 Hook"
+    },
+    {
+      "from": "process",
+      "to": "save_evidence",
+      "site": "save",
+      "kind": "直接调用"
+    },
+    {
+      "from": "process",
+      "to": "bound",
+      "site": "_bound_content",
+      "kind": "直接调用"
+    },
+    {
+      "from": "bound",
+      "to": "truncate",
+      "site": "truncate_text",
+      "kind": "直接调用"
+    },
+    {
+      "from": "execute",
+      "to": "receive",
+      "site": "emit",
+      "kind": "Agent._receive 作为事件出口"
+    },
+    {
+      "from": "receive",
+      "to": "emit",
+      "site": "listener",
+      "kind": "Runner 用 subscribe 绑定 emit"
+    },
+    {
+      "from": "emit",
+      "to": "topic",
+      "site": "update_from_event",
+      "kind": "工具结束事件触发"
+    },
+    {
+      "from": "topic",
+      "to": "persist_topic",
+      "site": "_persist",
+      "kind": "状态有变化时写盘"
+    },
+    {
+      "from": "walk",
+      "to": "steer",
+      "site": "steer",
+      "kind": "模拟运行中用户补充"
+    },
+    {
+      "from": "walk",
+      "to": "followup",
+      "site": "follow_up",
+      "kind": "模拟用户追问"
+    },
+    {
+      "from": "mcp_call",
+      "to": "server_tool",
+      "site": "call_tool",
+      "kind": "JSON-RPC tools/call 跨进程路由，非本地直接跳转"
+    },
+    {
+      "from": "agent_run",
+      "to": "continue_loop",
+      "site": "run_agent_loop_continue",
+      "kind": "continue_run 无新消息分支"
+    },
+    {
+      "from": "continue_loop",
+      "to": "loop",
+      "site": "run_agent_loop",
+      "kind": "共享循环入口"
+    },
+    {
+      "from": "stream",
+      "to": "resolve_tools",
+      "site": "_resolve_tools",
+      "kind": "每轮请求前刷新工具声明"
+    },
+    {
+      "from": "resolve_tools",
+      "to": "visible_tools",
+      "site": "tools_provider",
+      "kind": "config 注入的当前工具提供器"
+    },
+    {
+      "from": "stream",
+      "to": "receive",
+      "site": "emit",
+      "kind": "消息流事件出口"
+    }
+  ]
+}

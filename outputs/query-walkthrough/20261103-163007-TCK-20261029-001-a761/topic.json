@@ -1,0 +1,140 @@
+{
+  "question": "订单查询从今天 10 点开始明显变慢",
+  "scope": {
+    "ticket_id": "TCK-20261029-001",
+    "instance_id": "db-mysql-001",
+    "database": "shop_order",
+    "database_type": "mysql",
+    "scenario_id": "mysql-slow-sql-001",
+    "scenario_label": "MySQL 慢查询缺少联合索引导致订单列表超时",
+    "time_range": {
+      "start": "2026-10-29T10:00:00+08:00",
+      "end": "2026-10-29T11:00:00+08:00"
+    },
+    "mock": true
+  },
+  "facts": [
+    {
+      "key": "slow_log.top",
+      "statement": "最慢 SQL 指纹 a1b2c3d4e5f6：平均 2380 ms，最大 8120 ms，出现 1240 次，平均扫描 185000 行、返回 20 行",
+      "evidence_id": "ev-000001",
+      "source_tool": "slow_log_query",
+      "observed": true,
+      "data": {
+        "sql_fingerprint": "a1b2c3d4e5f6",
+        "avg_latency_ms": 2380,
+        "max_latency_ms": 8120,
+        "count": 1240,
+        "avg_rows_examined": 185000,
+        "avg_rows_sent": 20,
+        "truncated": true,
+        "raw_size_chars": 16658,
+        "max_inline_chars": 4000
+      }
+    },
+    {
+      "key": "slow_log.coverage",
+      "statement": "慢日志采样覆盖率约 0.92，不代表全量请求",
+      "evidence_id": "ev-000001",
+      "source_tool": "slow_log_query",
+      "observed": true,
+      "data": {
+        "coverage_ratio": 0.92
+      }
+    },
+    {
+      "key": "execution_plan.access",
+      "statement": "执行计划访问类型 ALL，未命中索引，估算扫描 185000 行，Extra：Using where, Using filesort",
+      "evidence_id": "ev-000002",
+      "source_tool": "execution_plan",
+      "observed": true,
+      "data": {
+        "access_type": "ALL",
+        "key": null,
+        "full_scan": true,
+        "estimated_rows": 185000,
+        "actual_rows_sent": 20,
+        "extra": [
+          "Using where",
+          "Using filesort"
+        ]
+      }
+    },
+    {
+      "key": "lock_wait.samples",
+      "statement": "锁等待查询返回 no_data：采样窗口内没有样本",
+      "evidence_id": "ev-000004",
+      "source_tool": "lock_wait_query",
+      "observed": true,
+      "data": {
+        "status": "no_data",
+        "sample_count": 0
+      }
+    }
+  ],
+  "candidates": [
+    {
+      "key": "access_path",
+      "statement": "最慢 SQL 执行计划显示全表扫描，可能无法有效利用现有索引；这是有观测支持的推断，仍需真实 EXPLAIN ANALYZE 复核",
+      "status": "supported",
+      "evidence": [
+        "ev-000001",
+        "ev-000002"
+      ]
+    },
+    {
+      "key": "instance_resource",
+      "statement": "实例 CPU/IO 是否成为瓶颈：监控接口失败，尚未验证",
+      "status": "unverified",
+      "evidence": [
+        "ev-000003"
+      ]
+    },
+    {
+      "key": "lock_wait",
+      "statement": "锁等待影响：采样窗口内无样本，当前无法确认或排除",
+      "status": "unverified",
+      "evidence": [
+        "ev-000004"
+      ]
+    }
+  ],
+  "open_questions": [
+    "工具 instance_metrics 执行失败，相关结论未验证：实例监控接口超时（模拟）：等待 5 秒仍未返回，CPU、IO 等监控数据未获取到，不能据此判断实例负载是否正常。",
+    "无锁等待样本不等于没有锁等待，需要更长窗口或其它采样源复核"
+  ],
+  "next_steps": [
+    "汇总证据并输出报告"
+  ],
+  "attempted_tools": [
+    "slow_log_query",
+    "evidence_read",
+    "search_tools",
+    "execution_plan",
+    "instance_metrics",
+    "lock_wait_query"
+  ],
+  "evidence_reads": [
+    {
+      "evidence_id": "ev-000001",
+      "offset": 4000,
+      "limit": 800,
+      "total_chars": 16658,
+      "truncated": true,
+      "is_error": false
+    }
+  ],
+  "searches": [
+    {
+      "query": "执行计划 实例监控 锁等待",
+      "match_count": 4,
+      "loaded": [
+        "execution_plan",
+        "instance_metrics",
+        "lock_wait_query"
+      ],
+      "is_error": false
+    }
+  ],
+  "updated_at": "2026-11-03T08:30:07.741012+00:00"
+}

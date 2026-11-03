@@ -119,6 +119,11 @@ class ApiSettings:
     max_inline_chars: int = 4000
     context_budget: int = 12000
     context_messages: int = 10
+    # 0 次重试可关闭；压缩默认关闭，避免悄悄增加真实模型的摘要请求费用。
+    model_retries: int = 2
+    compaction_enabled: bool = False
+    compaction_trigger_chars: int = 10000
+    compaction_keep_messages: int = 4
     default_max_turns: int = 10
     # MCP 工具服务连接配置。默认 stdio：每个任务启动一个 MCP 子进程，
     # 不要求用户先手动开服务，适合本地开发和测试。
@@ -143,6 +148,17 @@ class ApiSettings:
                 f"{', '.join(sorted(MCP_TRANSPORTS))}，当前值：{self.mcp_transport}"
             )
         self.mcp_transport = normalized
+        # 在服务启动前复用运行策略的校验，避免后台任务入库为 running 后
+        # 才因负数配置报错，留下看起来永远不结束的任务。
+        from app.runtime.pi_reference.compaction import CompactionSettings
+        from app.runtime.pi_reference.retry import RetryPolicy
+
+        RetryPolicy(max_retries=self.model_retries)
+        CompactionSettings(
+            enabled=self.compaction_enabled,
+            trigger_chars=self.compaction_trigger_chars,
+            keep_recent_messages=self.compaction_keep_messages,
+        )
 
     def mcp_endpoint(self) -> str:
         """返回展示和连接用的 MCP 地址。
@@ -210,6 +226,10 @@ class ApiSettings:
             max_inline_chars=_env_int("SUPPORT_PLATFORM_MAX_INLINE", 4000),
             context_budget=_env_int("SUPPORT_PLATFORM_CONTEXT_BUDGET", 12000),
             context_messages=_env_int("SUPPORT_PLATFORM_CONTEXT_MESSAGES", 10),
+            model_retries=_env_int("SUPPORT_PLATFORM_MODEL_RETRIES", 2),
+            compaction_enabled=bool(_env_int("SUPPORT_PLATFORM_COMPACTION_ENABLED", 0)),
+            compaction_trigger_chars=_env_int("SUPPORT_PLATFORM_COMPACTION_TRIGGER", 10000),
+            compaction_keep_messages=_env_int("SUPPORT_PLATFORM_COMPACTION_KEEP", 4),
             default_max_turns=_env_int("SUPPORT_PLATFORM_MAX_TURNS", 10),
             mcp_transport=os.getenv("SUPPORT_PLATFORM_MCP_TRANSPORT", "stdio"),
             mcp_url=os.getenv("SUPPORT_PLATFORM_MCP_URL", "").strip() or None,

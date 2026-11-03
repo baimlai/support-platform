@@ -22,7 +22,7 @@ Skill（方法说明 + 初始工具）
   -> 工具会话（可见工具 + 平台工具 search_tools/evidence_read）
   -> 上下文与预算钩子
   -> AgentLoopConfig（tools_provider / transform_context / after_tool_call）
-  -> run_agent_loop
+  -> Agent.prompt -> run_agent_loop
 ```
 
 顺序不是随便排的：记录器要最先创建，因为 MCP 协议追踪、证据和 Topic
@@ -59,10 +59,11 @@ Skill（方法说明 + 初始工具）
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.adapters.context_summary import extractive_mock_summary, make_model_summarizer
 from app.adapters.models import build_model
 from app.adapters.run_recorder import RunRecorder
 from app.harness.context import (
@@ -85,7 +86,10 @@ from app.runtime.contracts import (
     CancellationToken,
     ToolExecutionEnd,
 )
-from app.runtime.pi_reference.loop import LoopResult, run_agent_loop
+from app.runtime.pi_reference.agent import Agent
+from app.runtime.pi_reference.compaction import CompactionSettings, ContextCompactor
+from app.runtime.pi_reference.loop import LoopResult
+from app.runtime.pi_reference.retry import RetryPolicy, with_model_retry
 
 
 @dataclass(slots=True)
@@ -134,6 +138,9 @@ class RunOptions:
     model_timeout_s: float = 120.0
     model_max_tokens: int = 4096
     model_temperature: float = 0.2
+    # 可变配置也使用工厂：每次调查独立持有策略，便于 CLI 和 API 共用。
+    retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
+    compaction: CompactionSettings = field(default_factory=CompactionSettings)
 
 
 @dataclass(slots=True)
@@ -154,6 +161,8 @@ class RunOutcome:
     # 本次连接到的 MCP Server 摘要：传输方式、协议版本、工具清单等。
     # CLI 会打印它，run.json 也会保存一份，方便确认“确实走了 MCP”。
     mcp: McpClientInfo
+    # 高级调用方可在 MCP 会话存活期间，通过 on_agent 拿到此对象追加输入。
+    agent: Agent
 
 
 class AgentRunner:
@@ -166,6 +175,7 @@ class AgentRunner:
         self,
         cancellation: CancellationToken | None = None,
         on_event: Callable[[AgentEvent], None] | None = None,
+        on_agent: Callable[[Agent], None] | None = None,
     ) -> RunOutcome:
         """跑完一次调查并返回结果。
 
@@ -220,6 +230,7 @@ class AgentRunner:
                 model_id=model_id,
                 cancellation=cancellation,
                 on_event=on_event,
+                on_agent=on_agent,
                 mcp=mcp,
             )
 
@@ -234,6 +245,7 @@ class AgentRunner:
         model_id: str,
         cancellation: CancellationToken | None,
         on_event: Callable[[AgentEvent], None] | None,
+        on_agent: Callable[[Agent], None] | None,
         mcp: DbaMcpClient,
     ) -> RunOutcome:
         """在 MCP 连接已建立的前提下装配并执行调查。
@@ -270,26 +282,9 @@ class AgentRunner:
 
         # 8) 上下文：系统提示词 + Skill；每轮请求前再由 transform 钩子裁剪。
         context = build_initial_context(ticket, skill=skill)
-        transform = make_transform_context(
-            context=context,
-            ticket=ticket,
-            topic_provider=topic.topic_dict,
-            budget=options.context_budget,
-        )
-
         processor = EvidenceProcessor(
             store=evidence,
             skip_tool_names=set(PLATFORM_TOOL_NAMES),
-        )
-
-        config = AgentLoopConfig(
-            model=model_id,
-            max_turns=options.max_turns,
-            tool_timeout_s=options.tool_timeout_s,
-            # 每轮模型请求前重新取一次可见工具，搜索加载的新工具下一轮生效。
-            tools_provider=session.visible_specs,
-            transform_context=transform,
-            after_tool_call=processor.after_tool_call,
         )
 
         async def emit(event: AgentEvent) -> None:
@@ -309,16 +304,30 @@ class AgentRunner:
                     # 它不会再次进入这个分支，所以不会无限递归。
                     await emit(topic_event)
 
-        result = await run_agent_loop(
-            prompts=[build_user_message(ticket)],
-            context=context,
-            config=config,
-            emit=emit,
-            stream_fn=recorder.wrap_stream_fn(model.stream),
-            cancellation=(
-                cancellation if cancellation is not None else CancellationToken()
-            ),
+        # 装饰顺序：Loop -> Retry -> Recorder -> Model。
+        # 每次重试都经过记录器，所以不能把 Recorder 包在 Retry 外面只记最终一次。
+        stream_fn = with_model_retry(recorder.wrap_stream_fn(model.stream), options.retry_policy, emit)
+        summarize = (
+            extractive_mock_summary if options.model_provider == "mock"
+            else make_model_summarizer(stream_fn, model_id)
         )
+        compactor = ContextCompactor(
+            options.compaction, summarize, path=recorder.run_dir / "compaction.json", emit=emit,
+        )
+        transform = make_transform_context(
+            context=context, ticket=ticket, topic_provider=topic.topic_dict,
+            budget=options.context_budget, compactor=compactor,
+        )
+        config = AgentLoopConfig(
+            model=model_id, max_turns=options.max_turns, tool_timeout_s=options.tool_timeout_s,
+            tools_provider=session.visible_specs, transform_context=transform,
+            after_tool_call=processor.after_tool_call,
+        )
+        agent = Agent(context, config, stream_fn)
+        agent.subscribe(emit)
+        if on_agent is not None:
+            on_agent(agent)
+        result = await agent.prompt([build_user_message(ticket)], cancellation)
 
         # 9) 运行结束：把 MCP 连接信息、能力使用情况、最终 Topic、证据数量
         #    一并写进 run.json。这样事后能确认这次调查到底连了哪个 MCP Server、
@@ -335,6 +344,8 @@ class AgentRunner:
                 "final_visible_tools": session.visible_names(),
                 "loaded_by_search": list(session.loaded_by_search),
                 "searches": list(session.searches),
+                "retry_policy": asdict(options.retry_policy),
+                "compaction": asdict(options.compaction),
             },
             topic=topic.topic_dict(),
             evidence_count=evidence.count,
@@ -347,6 +358,7 @@ class AgentRunner:
             session=session,
             topic=topic,
             evidence=evidence,
-            context=context,
+            context=result.context,
             mcp=mcp_info,
+            agent=agent,
         )

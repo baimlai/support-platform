@@ -8,21 +8,19 @@ r"""关键词工具搜索与按需加载。
 
 ## 搜索规则
 
-这是**简单关键词搜索**，不是向量检索：
+这是**分字段 BM25 搜索**，不是向量检索：
 - 工具名、标签、描述、参数名都参与匹配；
 - 中文查询通过一张别名表映射到英文关键词，例如“执行计划”会匹配
   `execution_plan` 的描述里的 `execution`、`plan`、`explain`；
-- 命中分数高者优先，同分按工具名排序；
+- 精确名称优先，再按查询词覆盖数、BM25 分数排序；同分保留目录顺序；
 - 搜索只改变“后续请求能看到哪些工具”，**不授予任何权限**。
   没被加载的工具，执行阶段也查不到，模型猜名字也没用。
 
 ## 实现说明
 
-- `re.split(r"[\s,，、;；]+", text)`：按空格和中英文标点切词。
-  例子：`"执行计划, 锁等待"` 会切成 `["执行计划", "锁等待"]`。
+- 名称拆词、Unicode 片段和 BM25 的教学说明见 `runtime/pi_reference/search.py`。
 - `frozenset({...})` 是“不可变集合”，适合放常量；成员判断是 O(1)。
-- `sorted(..., key=lambda item: (-item[1], item[0].name))`：
-  先按分数从高到低（所以取负号），分数相同再按名字升序。
+- 排名器使用稳定排序；输入目录相同，同分结果的顺序也相同。
 - `set` 的 `|` 是并集，`update` 是原地并入。
 - `@classmethod` 的第一个参数是类本身（习惯写 `cls`），用来提供“另一种创建对象的方式”。
 """
@@ -30,13 +28,13 @@ r"""关键词工具搜索与按需加载。
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.harness.evidence import DEFAULT_READ_LIMIT, EvidenceNotFound, EvidenceStore
 from app.harness.tools import ToolExecutionError
 from app.runtime.contracts import CancellationToken, TextContent, ToolResult, ToolSpec
+from app.runtime.pi_reference.search import SearchDocument, rank_documents
 
 # 平台工具：所有 Skill 都自动可用，不参与业务工具搜索，也不保存证据。
 # 为什么用 frozenset：它是不可变集合，适合做常量，避免被调用方误改。
@@ -166,16 +164,6 @@ PLATFORM_TOOL_DECLARATIONS: list[dict[str, Any]] = [
 ]
 
 
-def _tokenize(query: str) -> list[str]:
-    """把查询切成关键词，并统一转小写。
-
-    例子：
-        `"执行计划, 锁等待"` -> `["执行计划", "锁等待"]`
-        `"Slow  Log"` -> `["slow", "log"]`
-    """
-    return [part for part in re.split(r"[\s,，、;；]+", query.lower()) if part]
-
-
 def _alias_terms(query: str) -> set[str]:
     """找出查询里出现的中文别名，展开成对应的英文关键词。
 
@@ -191,73 +179,38 @@ def _alias_terms(query: str) -> set[str]:
     return terms
 
 
-def _tool_fields(tool: ToolSpec) -> tuple[str, str, str, str]:
-    """取出参与搜索的四个文本字段，并统一转小写。
-
-    返回顺序：名称、标签、描述、参数名。
-    分开保留是为了按字段给不同权重：命中工具名比命中描述更有说服力。
-    """
-    name = tool.name.lower()
-    label = tool.label.lower()
-    description = tool.description.lower()
-    parameter_names = " ".join(tool.parameters.get("properties", {}).keys()).lower()
-    return name, label, description, parameter_names
-
-
 def search_tool_specs(
     tools: list[ToolSpec],
     query: str,
     limit: int = 5,
-) -> list[tuple[ToolSpec, int]]:
-    """按关键词给工具打分，返回 `(工具, 分数)` 列表。
+) -> list[tuple[ToolSpec, float]]:
+    """将业务工具送入 Pi 移植排名器，返回 (工具, 相对分数)。
 
-    打分规则（分数只是相对值，不需要精确）：
-    - 查询整体等于工具名/标签：+20；
-    - 查询里包含工具名/标签：+10；
-    - 每个查询词命中名称 +6、标签 +4、描述 +2、参数名 +1；
-    - 每个中文别名展开词按同样规则加分。
-
-    例子：查询“执行计划”，`execution_plan` 的描述里有 `execution plan`，
-    会拿到较高分；`slow_log_query` 的描述里没有这些词，分数为 0，不返回。
+    原始查询用于精确名称匹配，中文别名作为额外检索词。排序算法集中在
+    runtime/pi_reference/search.py；这里仅做 DBA 目录到搜索文档的转换。
     """
-    query_text = query.strip()
-    if not query_text:
-        return []
+    # 业务适配留在 Harness：名称/标签/Schema 变成搜索文档，再调用纯排名函数。
+    # 不把 DBA 别名写进 Pi 内核，这样同一个排名器还能用于其他业务。
+    documents = [
+        SearchDocument(tool.name, f"{tool.label} {tool.description} {_schema_text(tool.parameters)}")
+        for tool in tools
+    ]
+    by_name = {tool.name: tool for tool in tools}
+    matches = rank_documents(query, documents, int(limit), extra_terms=_alias_terms(query))
+    return [(by_name[match.name], match.score) for match in matches]
 
-    query_lower = query_text.lower()
-    tokens = _tokenize(query_lower)
-    alias_terms = _alias_terms(query_lower)
-    # 两个集合合并后去重；如果查询既没有词也没有别名，直接返回空。
-    candidate_terms = set(tokens) | alias_terms
-    if not candidate_terms:
-        return []
 
-    scored: list[tuple[ToolSpec, int]] = []
-    for tool in tools:
-        name, label, description, parameter_names = _tool_fields(tool)
-        score = 0
-
-        if query_lower in (name, label):
-            score += 20
-        elif name in query_lower or label in query_lower:
-            score += 10
-
-        for term in candidate_terms:
-            if term in name:
-                score += 6
-            if term in label:
-                score += 4
-            if term in description:
-                score += 2
-            if term in parameter_names:
-                score += 1
-
-        if score > 0:
-            scored.append((tool, score))
-
-    # 先按分数降序，再按名字升序，保证同样的查询每次返回顺序一致。
-    scored.sort(key=lambda item: (-item[1], item[0].name))
-    return scored[: max(1, int(limit))]
+def _schema_text(schema: Any, depth: int = 0) -> str:
+    """递归收集参数名和说明；不把默认值/大样例数据塞进索引。"""
+    if not isinstance(schema, dict) or depth > 12:
+        return ""
+    parts = [str(schema.get("description", ""))]
+    for name, child in schema.get("properties", {}).items():
+        parts.extend((name, _schema_text(child, depth + 1)))
+    parts.append(_schema_text(schema.get("items"), depth + 1))
+    for key in ("anyOf", "oneOf", "allOf"):
+        parts.extend(_schema_text(child, depth + 1) for child in schema.get(key, []))
+    return " ".join(parts)
 
 
 @dataclass(slots=True)

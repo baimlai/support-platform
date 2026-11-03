@@ -420,13 +420,24 @@ def _bound_content(
 
     # 预览给到上限的三分之一左右，剩下的空间留给摘要和说明。
     preview_chars = max(200, max_inline_chars // 3)
+    # 证据仍完整保存；预览再加一层按完整行/UTF-8 字节控量。
+    # 字符预算不能等同于字节预算：中文一个字通常占三个 UTF-8 字节。
+    from app.runtime.pi_reference.truncate import truncate_text
+
+    preview = truncate_text(raw_text, max_lines=20, max_bytes=preview_chars)
     envelope = {
         "truncated": True,
         "evidence_id": meta.evidence_id,
         "tool_name": meta.tool_name,
         "size_chars": meta.size_chars,
         "max_inline_chars": max_inline_chars,
-        "preview": raw_text[:preview_chars],
+        "preview": preview.content,
+        "preview_limits": {
+            "unit": "utf-8 bytes / lines",
+            "output_bytes": preview.output_bytes,
+            "truncated_by": preview.truncated_by,
+            "first_line_exceeds_limit": preview.first_line_exceeds_limit,
+        },
         "summary": details,
         "next": (
             "完整原始结果已保存。需要更多内容时调用 "
